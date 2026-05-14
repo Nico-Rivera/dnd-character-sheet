@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- Compose handles theming in code; this is just an Android base theme
+         so the activity has a Material parent before setContent runs. -->
+    <style name="Theme.DnDCharacterSheet" parent="android:Theme.Material.Light.NoActionBar" />
+</resources>
