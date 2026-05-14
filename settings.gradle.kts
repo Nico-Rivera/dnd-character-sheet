@@ -22,3 +22,4 @@ rootProject.name = "dnd-character-sheet"
 include(":app")
 include(":core:domain")
 include(":core:rules")
+include(":core:data")

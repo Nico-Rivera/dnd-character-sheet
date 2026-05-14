@@ -56,6 +56,7 @@ android {
 dependencies {
     implementation(project(":core:domain"))
     implementation(project(":core:rules"))
+    implementation(project(":core:data"))
 
     // AndroidX core + lifecycle
     implementation("androidx.core:core-ktx:1.13.1")

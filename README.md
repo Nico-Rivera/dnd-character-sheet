@@ -6,9 +6,14 @@ annotation over the sheet.
 
 ## Current state
 
-**Commit 1 — scaffold + data model + calculations engine.** No UI yet beyond
-a placeholder activity. The calculations engine in `:core:rules` is the focus
-of this commit and is fully unit-tested.
+**Commit 2 — Room data layer.** Adds `:core:data`: a Room database, DAO,
+mapper, and a concrete `RoomCharacterRepository` that implements the
+`CharacterRepository` interface declared in `:core:domain`. Still no UI
+beyond the placeholder activity — that's commit 3.
+
+**Commit 1 — scaffold + data model + calculations engine.** Modules and
+package layout, the pure-Kotlin domain types, and a fully unit-tested
+calculations engine.
 
 ## Module layout
 
@@ -18,6 +23,8 @@ of this commit and is fully unit-tested.
                No Android dependencies — could be reused on JVM/desktop.
 :core:rules    Pure-Kotlin calculations engine. Stateless, fully testable.
                Depends only on :core:domain.
+:core:data     Room storage + repository implementation. The only module
+               that imports Android persistence APIs.
 ```
 
 This split is deliberate: keeping rules and domain free of Android lets the
@@ -68,15 +75,13 @@ This creates the wrapper files. From then on, use `./gradlew` (Unix) or
 
 ### Running tests
 
-The calculation tests are the load-bearing part of this commit:
-
 ```
-gradlew.bat :core:rules:test
+gradlew.bat :core:rules:test         # ~80 tests on the calc engine
+gradlew.bat :core:data:testDebugUnitTest  # ~6 tests on the mapper round-trip
 ```
 
-Expected: ~55 tests across `AbilityCalculatorTest`, `ProficiencyCalculatorTest`,
-`SkillCalculatorTest`, `SavingThrowCalculatorTest`, `WeaponCalculatorTest`,
-`SpellSlotCalculatorTest`, `SpellcastingCalculatorTest`, `PassiveCalculatorTest`.
+In Android Studio: right-click on either of `core/rules/src/test/java/com/dndsheet/rules`
+or `core/data/src/test/java/com/dndsheet/data/mapper` and pick "Run Tests in …".
 
 ### Building the APK
 
@@ -111,13 +116,35 @@ Output lands in `app/build/outputs/apk/debug/`.
 All calculators check `ManualOverrides` first, so the user's pinned value
 always wins per spec §8.
 
+## What's in the data layer (commit 2)
+
+- **Hybrid storage schema** — the `characters` table has top-level columns
+  for the fields the character-list screen needs (id, name, ruleset,
+  total_level, updated_at, revision) plus a single `json` column with the
+  full serialized `Character`. Listing characters scans the table without
+  touching JSON; opening a character is one row read + one parse.
+- **Forward compatibility** — `ignoreUnknownKeys = true` on the JSON
+  instance means a character file from a future build (with new fields
+  the current build doesn't know about) opens cleanly; the unknown fields
+  are dropped silently.
+- **`RoomCharacterRepository`** — auto-bumps `revision` and `updatedAt`
+  on every save so the UI never has to remember to. Takes an optional
+  `now: () -> Long` so tests can pin timestamps.
+- **JSON export/import** — pretty-printed for export (intended for humans
+  to read or share), compact for storage. Import always assigns a fresh
+  UUID so re-importing the same backup creates a duplicate rather than
+  overwriting.
+- **Round-trip mapper tests** — six tests that build a character (default,
+  fully populated, multiclass, with overrides), serialize it, and assert
+  structural equality after deserialization. Catches any future field
+  that gets added to `Character` but doesn't survive the trip.
+
 ## What's NOT in this commit
 
-- Room database (next commit)
-- Compose UI for the sheet
-- Save/load wiring through a `ViewModel`
+- Compose UI for the sheet (commit 3)
+- ViewModel layer connecting UI to repository
 - Annotation layer
-- Export to JSON/PDF
+- PDF / image export (JSON export is in)
 
 See the project spec's priority order for what lands next.
 
