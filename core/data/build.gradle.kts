@@ -28,8 +28,8 @@ dependencies {
 
     // Room. KSP (not kapt) for the annotation processor — faster and the
     // Kotlin-native path forward.
-    implementation("androidx.room:room-runtime:2.6.1")
-    implementation("androidx.room:room-ktx:2.6.1")     // Flow + suspend helpers
+    api("androidx.room:room-runtime:2.6.1")
+    api("androidx.room:room-ktx:2.6.1")     // Flow + suspend helpers
     ksp("androidx.room:room-compiler:2.6.1")
 
     testImplementation("junit:junit:4.13.2")

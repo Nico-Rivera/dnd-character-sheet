@@ -72,6 +72,14 @@ dependencies {
     implementation("androidx.compose.ui:ui-graphics")
     implementation("androidx.compose.ui:ui-tooling-preview")
     implementation("androidx.compose.material3:material3")
+    implementation("androidx.compose.material:material-icons-extended")
+
+    // ViewModel + state collection in Compose
+    implementation("androidx.lifecycle:lifecycle-viewmodel-compose:2.8.2")
+    implementation("androidx.lifecycle:lifecycle-runtime-compose:2.8.2")
+
+    // Single-activity navigation between the list and the sheet
+    implementation("androidx.navigation:navigation-compose:2.7.7")
 
     debugImplementation("androidx.compose.ui:ui-tooling")
     debugImplementation("androidx.compose.ui:ui-test-manifest")

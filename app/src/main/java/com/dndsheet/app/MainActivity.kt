@@ -3,31 +3,29 @@ package com.dndsheet.app
 import android.os.Bundle
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
-import androidx.compose.foundation.layout.Arrangement
-import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.fillMaxSize
-import androidx.compose.foundation.layout.padding
-import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
-import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
-import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.tooling.preview.Preview
-import androidx.compose.ui.unit.dp
+import androidx.lifecycle.Lifecycle
+import androidx.navigation.NavBackStackEntry
+import androidx.navigation.NavType
+import androidx.navigation.compose.NavHost
+import androidx.navigation.compose.composable
+import androidx.navigation.compose.rememberNavController
+import androidx.navigation.navArgument
+import com.dndsheet.app.nav.Routes
+import com.dndsheet.app.ui.character.CharacterListScreen
+import com.dndsheet.app.ui.character.CharacterOverviewScreen
+import com.dndsheet.app.ui.theme.DnDTheme
 
-/**
- * Placeholder activity. The real UI (overview, combat, spellcasting, inventory,
- * notes, annotation mode) will be added in a later commit per the spec's
- * priority order — see README.md.
- */
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         setContent {
-            MaterialTheme {
+            DnDTheme {
                 Surface(modifier = Modifier.fillMaxSize()) {
-                    PlaceholderScreen()
+                    AppNav()
                 }
             }
         }
@@ -35,27 +33,33 @@ class MainActivity : ComponentActivity() {
 }
 
 @Composable
-private fun PlaceholderScreen() {
-    Column(
-        modifier = Modifier
-            .fillMaxSize()
-            .padding(24.dp),
-        verticalArrangement = Arrangement.Center,
-        horizontalAlignment = Alignment.CenterHorizontally
-    ) {
-        Text(
-            text = "D&D Character Sheet",
-            style = MaterialTheme.typography.headlineMedium
-        )
-        Text(
-            text = "UI coming in a later commit.",
-            style = MaterialTheme.typography.bodyMedium
-        )
+private fun AppNav() {
+    val nav = rememberNavController()
+    NavHost(navController = nav, startDestination = Routes.LIST) {
+        composable(Routes.LIST) { entry ->
+            CharacterListScreen(
+                onOpen = { id -> if (entry.canNavigate()) nav.navigate(Routes.overview(id)) }
+            )
+        }
+        composable(
+            route = Routes.OVERVIEW_PATTERN,
+            arguments = listOf(navArgument(Routes.OVERVIEW_ARG_ID) { type = NavType.StringType })
+        ) { entry ->
+            val id = entry.arguments?.getString(Routes.OVERVIEW_ARG_ID).orEmpty()
+            CharacterOverviewScreen(
+                characterId = id,
+                onBack = { if (entry.canNavigate()) nav.popBackStack() }
+            )
+        }
     }
 }
 
-@Preview(showBackground = true)
-@Composable
-private fun PlaceholderPreview() {
-    MaterialTheme { PlaceholderScreen() }
-}
+/**
+ * Tap-spam guard. A NavBackStackEntry is RESUMED only while its screen is
+ * the active top of the stack. As soon as a navigation starts the entry
+ * drops to STARTED, so a second rapid tap on a back/open button is a
+ * no-op until the destination settles. This is the recommended Compose
+ * Nav pattern for single-press navigation.
+ */
+private fun NavBackStackEntry.canNavigate(): Boolean =
+    lifecycle.currentState.isAtLeast(Lifecycle.State.RESUMED)

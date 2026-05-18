@@ -6,10 +6,25 @@ annotation over the sheet.
 
 ## Current state
 
+**Commit 4 — core-sheet editing.** A pencil icon in the top app bar
+toggles edit mode. In edit mode the title bar tints, header fields
+become tappable, an inline class editor appears, the HP and ability
+blocks become tappable, and skill / save rows cycle through
+NONE → HALF → PROFICIENT → EXPERTISE on tap. Every edit flows through
+the ViewModel into the repository, which bumps `revision` + `updatedAt`
+so other observers see the change immediately.
+
+**Commit 3 — first real Compose UI.** Two screens: a character list with
+create/duplicate/delete, and a read-only character overview that renders
+every value through the calculation engine and flags manual overrides
+inline with a small dot. Single-activity Compose Navigation, M3 theme
+with optional dynamic color, manual DI through an `AppContainer` held
+by `DnDApplication` (Hilt later — at this scale the codegen would dwarf
+the actual wiring).
+
 **Commit 2 — Room data layer.** Adds `:core:data`: a Room database, DAO,
 mapper, and a concrete `RoomCharacterRepository` that implements the
-`CharacterRepository` interface declared in `:core:domain`. Still no UI
-beyond the placeholder activity — that's commit 3.
+`CharacterRepository` interface declared in `:core:domain`.
 
 **Commit 1 — scaffold + data model + calculations engine.** Modules and
 package layout, the pure-Kotlin domain types, and a fully unit-tested
@@ -76,12 +91,20 @@ This creates the wrapper files. From then on, use `./gradlew` (Unix) or
 ### Running tests
 
 ```
-gradlew.bat :core:rules:test         # ~80 tests on the calc engine
-gradlew.bat :core:data:testDebugUnitTest  # ~6 tests on the mapper round-trip
+gradlew.bat :core:rules:test                 # ~80 tests on the calc engine
+gradlew.bat :core:data:testDebugUnitTest     # ~6 tests on the mapper round-trip
 ```
 
 In Android Studio: right-click on either of `core/rules/src/test/java/com/dndsheet/rules`
 or `core/data/src/test/java/com/dndsheet/data/mapper` and pick "Run Tests in …".
+
+### Running the app
+
+Pick an emulator or connected device from the run target dropdown and hit
+Run. On the empty character list, tap "Add example character" — that
+creates a Wizard 4 / Cleric 1 with a representative spread of skills,
+abilities, weapons, and spells. Open it to see the calculation engine
+rendered as a sheet.
 
 ### Building the APK
 
@@ -139,12 +162,65 @@ always wins per spec §8.
   structural equality after deserialization. Catches any future field
   that gets added to `Character` but doesn't survive the trip.
 
+## What's in commit 3 (UI)
+
+- **`CharacterListScreen`** — `LazyColumn` of all saved characters.
+  Each row shows name, class line ("Wizard 4 / Cleric 1"), and a relative
+  last-edited timestamp. A FAB creates a blank Fighter 1; the empty state
+  also offers an "example character" seeder so a fresh install has
+  something to render.
+- **`CharacterOverviewScreen`** — read-only sheet view.
+  Header (class line, race, background, alignment, ruleset), vitals chips
+  (level / proficiency bonus / initiative / HP), the six ability boxes
+  in their classic 3×2 grid, all six saves, all 18 skills, and the three
+  passive scores. Every numeric value comes through the calculator; every
+  calculator's `isOverridden(...)` decides whether to render the pin dot.
+- **Navigation** — single activity, `androidx.navigation:navigation-compose`,
+  two routes (`characters`, `character/{id}`).
+- **Theming** — `DnDTheme` uses M3 dynamic color on Android 12+, falling
+  back to a parchment-and-ink palette. Annotation layer (commit 5) will
+  read its ink color from `MaterialTheme.colorScheme` so it stays in sync
+  with the active theme automatically.
+- **DI** — `AppContainer` instantiated in `DnDApplication.onCreate()`.
+  ViewModels grab the repository via `LocalContext.current.applicationContext`
+  in a small helper. Trivial to swap for Hilt when the wiring outgrows it.
+
+## What's in commit 4 (editing)
+
+- **Edit mode toggle** — top-bar pencil. The title bar tints to
+  `primaryContainer` while editing so it's obvious which mode you're in.
+  Tap the check icon to exit.
+- **Inline tap-to-edit dialogs**:
+  - Identity: name, species, background, alignment (chip picker),
+    ruleset (chip picker).
+  - HP: a three-field dialog (current / max / temp). Confirm clamps
+    `currentHp` to `max + temp` so reducing max doesn't leave you
+    out of bounds.
+  - Ability scores: tap a block, enter a value in 1–30.
+- **Class editor section** — visible only in edit mode. Each class row
+  shows `+`/`−` level buttons (clamped to 1..20 and respecting the 20
+  total-level cap), a delete icon, and a summary line (level · hit die ·
+  spellcasting ability). "Add class" opens a dialog that captures class
+  name, optional subclass, hit die (d6/d8/d10/d12), progression
+  (NONE/FULL/HALF/THIRD/PACT), and spellcasting ability when relevant.
+- **Tap-to-cycle proficiencies** — in edit mode, tapping a save or
+  skill row cycles its tier NONE → HALF → PROFICIENT → EXPERTISE → NONE.
+  The bonus updates immediately because the row reads through the
+  calculator. Cycling back to NONE removes the entry from the
+  proficiency map rather than storing `NONE` explicitly.
+
 ## What's NOT in this commit
 
-- Compose UI for the sheet (commit 3)
-- ViewModel layer connecting UI to repository
-- Annotation layer
-- PDF / image export (JSON export is in)
+- **Weapon / spell / inventory editing** — separate page(s) in a later
+  commit; the overview doesn't try to be every page.
+- **Manual override editing** — long-press to pin/unpin any calculated
+  value. The data layer already supports overrides; the UI to set them
+  is queued.
+- **Combat / spells / inventory pages** — a single overview page is
+  enough to validate the architecture; the dedicated pages land later.
+- **Annotation layer** (commit 5) — freehand ink over the sheet.
+- **Export to PDF / image** — JSON export already exists via the
+  repository, but the UI button to trigger it isn't wired yet.
 
 See the project spec's priority order for what lands next.
 
