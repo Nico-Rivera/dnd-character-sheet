@@ -49,6 +49,7 @@ import androidx.lifecycle.viewmodel.compose.viewModel
 import com.dndsheet.app.DnDApplication
 import com.dndsheet.app.ui.character.components.AbilityScoreBlock
 import com.dndsheet.app.ui.character.components.PinnedIndicator
+import com.dndsheet.app.ui.character.components.SheetBox
 import com.dndsheet.app.ui.character.components.StatRow
 import com.dndsheet.app.ui.character.edit.ActiveDialog
 import com.dndsheet.app.ui.character.edit.AddClassDialog
@@ -302,20 +303,22 @@ private fun SheetBody(
             onRestore = onRestoreHitDie,
             onRestoreAll = onRestoreAllHitDice
         )
-        SectionHeader("Abilities")
+        // Each ability is already its own bordered block, so no outer SheetBox
+        // wraps them — that keeps every ability as an independent unit for
+        // the drag-to-reposition commit.
         AbilitiesGrid(character, editing, onOpenDialog)
-        SectionHeader("Saving Throws")
-        SavesSection(character, editing, onCycleSaveProf)
-        SectionHeader("Skills")
-        SkillsSection(character, editing, onCycleSkillProf)
-        SectionHeader("Passives")
-        PassivesSection(character)
+        SavesGroup(character, editing, onCycleSaveProf)
+        SkillsGroup(character, editing, onCycleSkillProf)
+        SheetBox(title = "Passives") {
+            PassivesSection(character)
+        }
         if (character.conditions.isNotEmpty()) {
-            SectionHeader("Conditions")
-            Text(
-                text = character.conditions.joinToString(", "),
-                style = MaterialTheme.typography.bodyMedium
-            )
+            SheetBox(title = "Conditions") {
+                Text(
+                    text = character.conditions.joinToString(", "),
+                    style = MaterialTheme.typography.bodyMedium
+                )
+            }
         }
         Spacer(Modifier.height(24.dp))
     }
@@ -490,46 +493,81 @@ private fun VitalsRow(
     val initiative = PassiveCalculator.initiative(character)
     val initOver = character.overrides.initiative != null
 
-    Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
-        Row(
+    // Top-aligned so the taller HP box doesn't stretch the three short chips
+    // into ugly empty space — they sit at the top, HP grows downward to fit
+    // its heal/damage buttons.
+    Row(
+        modifier = Modifier.fillMaxWidth(),
+        horizontalArrangement = Arrangement.SpaceBetween,
+        verticalAlignment = Alignment.Top
+    ) {
+        VitalChip("Level", character.totalLevel.toString(), false, modifier = Modifier.weight(1f))
+        Spacer(Modifier.width(8.dp))
+        VitalChip("Prof", formatModifier(pb), pbOver, modifier = Modifier.weight(1f))
+        Spacer(Modifier.width(8.dp))
+        VitalChip("Init", formatModifier(initiative), initOver, modifier = Modifier.weight(1f))
+        Spacer(Modifier.width(8.dp))
+        HpBox(
+            current = character.currentHp,
+            max = character.maxHp,
+            modifier = Modifier.weight(1f),
+            onEdit = if (editing) ({ onOpenDialog(ActiveDialog.EditHp) }) else null,
+            onDamage = { onOpenDialog(ActiveDialog.AdjustHp(isHeal = false)) },
+            onHeal = { onOpenDialog(ActiveDialog.AdjustHp(isHeal = true)) }
+        )
+    }
+}
+
+/**
+ * HP is treated as one unit: label, current/max value, and the two heal/damage
+ * buttons all live inside the same box so the box acts as a single draggable
+ * element (commit 6). The − and + buttons are always tappable; the value area
+ * is only tappable in edit mode (opens the full max/current dialog). Compose's
+ * nested-clickable semantics let both targets coexist — the buttons consume
+ * their own clicks before the outer area sees them.
+ */
+@Composable
+private fun HpBox(
+    current: Int,
+    max: Int,
+    modifier: Modifier = Modifier,
+    onEdit: (() -> Unit)? = null,
+    onDamage: () -> Unit,
+    onHeal: () -> Unit
+) {
+    val click = if (onEdit != null) Modifier.clickable(onClick = onEdit) else Modifier
+    Box(
+        modifier = modifier
+            .clip(RoundedCornerShape(6.dp))
+            .background(MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.4f))
+            .border(1.dp, MaterialTheme.colorScheme.outline, RoundedCornerShape(6.dp))
+            .then(click)
+            .padding(horizontal = 8.dp, vertical = 8.dp)
+    ) {
+        Column(
+            horizontalAlignment = Alignment.CenterHorizontally,
             modifier = Modifier.fillMaxWidth(),
-            horizontalArrangement = Arrangement.SpaceBetween
+            verticalArrangement = Arrangement.spacedBy(6.dp)
         ) {
-            VitalChip("Level", character.totalLevel.toString(), false, modifier = Modifier.weight(1f))
-            Spacer(Modifier.width(8.dp))
-            VitalChip("Prof", formatModifier(pb), pbOver, modifier = Modifier.weight(1f))
-            Spacer(Modifier.width(8.dp))
-            VitalChip("Init", formatModifier(initiative), initOver, modifier = Modifier.weight(1f))
-            Spacer(Modifier.width(8.dp))
-            VitalChip(
-                label = "HP",
-                value = "${character.currentHp}/${character.maxHp}",
-                isOverridden = false,
-                modifier = Modifier.weight(1f),
-                onClick = if (editing) ({ onOpenDialog(ActiveDialog.EditHp) }) else null
+            Text("HP", style = MaterialTheme.typography.labelSmall)
+            Text(
+                "$current/$max",
+                style = MaterialTheme.typography.titleLarge,
+                fontWeight = FontWeight.SemiBold
             )
-        }
-        // Heal / damage row, aligned under the HP chip via a weight-3 spacer
-        // so the two buttons share the same horizontal slot as the HP chip
-        // above. Always tappable — these aren't gated by edit mode because
-        // adjusting HP mid-encounter is the most common action on the sheet.
-        Row(modifier = Modifier.fillMaxWidth()) {
-            // 3 chips wide + 3 inter-chip spacers worth of empty space.
-            Spacer(modifier = Modifier.weight(3f))
-            Spacer(modifier = Modifier.width(24.dp))
             Row(
-                modifier = Modifier.weight(1f),
+                modifier = Modifier.fillMaxWidth(),
                 horizontalArrangement = Arrangement.spacedBy(4.dp)
             ) {
                 OutlinedButton(
-                    onClick = { onOpenDialog(ActiveDialog.AdjustHp(isHeal = false)) },
+                    onClick = onDamage,
                     modifier = Modifier.weight(1f),
-                    contentPadding = androidx.compose.foundation.layout.PaddingValues(horizontal = 4.dp)
+                    contentPadding = androidx.compose.foundation.layout.PaddingValues(horizontal = 0.dp)
                 ) { Text("−", style = MaterialTheme.typography.titleMedium) }
                 OutlinedButton(
-                    onClick = { onOpenDialog(ActiveDialog.AdjustHp(isHeal = true)) },
+                    onClick = onHeal,
                     modifier = Modifier.weight(1f),
-                    contentPadding = androidx.compose.foundation.layout.PaddingValues(horizontal = 4.dp)
+                    contentPadding = androidx.compose.foundation.layout.PaddingValues(horizontal = 0.dp)
                 ) { Text("+", style = MaterialTheme.typography.titleMedium) }
             }
         }
@@ -600,42 +638,118 @@ private fun AbilitiesGrid(
     }
 }
 
+/**
+ * Ruleset-aware saves layout. 5e groups all six saves into one box;
+ * 2024 puts each save in its own box, laid out 3×2 to match the ability
+ * grid above. The 2024 version reads as paired with the abilities — each
+ * save sits visually beneath its ability score.
+ */
 @Composable
-private fun SavesSection(
+private fun SavesGroup(
     character: Character,
     editing: Boolean,
     onCycleSaveProf: (Ability) -> Unit
 ) {
-    Column {
-        for (ability in Ability.entries) {
-            StatRow(
-                label = ability.abbr,
-                bonus = SavingThrowCalculator.bonus(character, ability),
-                proficiencyTier = character.proficiencies[ability],
-                isOverridden = SavingThrowCalculator.isOverridden(character, ability),
-                onClick = if (editing) ({ onCycleSaveProf(ability) }) else null
-            )
+    if (character.ruleset == Ruleset.DND_5E_2014) {
+        SheetBox(title = "Saving Throws") {
+            for (ability in Ability.entries) {
+                SaveRow(character, ability, editing, onCycleSaveProf)
+            }
+        }
+    } else {
+        // 2024: one small box per save, 3×2 grid.
+        val rows = listOf(
+            listOf(Ability.STR, Ability.DEX, Ability.CON),
+            listOf(Ability.INT, Ability.WIS, Ability.CHA)
+        )
+        Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            for (row in rows) {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    for (ability in row) {
+                        SheetBox(
+                            title = "${ability.abbr} Save",
+                            modifier = Modifier.weight(1f),
+                            contentPadding = 8.dp
+                        ) {
+                            SaveRow(character, ability, editing, onCycleSaveProf, compact = true)
+                        }
+                    }
+                }
+            }
         }
     }
 }
 
 @Composable
-private fun SkillsSection(
+private fun SaveRow(
+    character: Character,
+    ability: Ability,
+    editing: Boolean,
+    onCycleSaveProf: (Ability) -> Unit,
+    compact: Boolean = false
+) {
+    StatRow(
+        label = if (compact) "" else ability.abbr,
+        bonus = SavingThrowCalculator.bonus(character, ability),
+        proficiencyTier = character.proficiencies[ability],
+        isOverridden = SavingThrowCalculator.isOverridden(character, ability),
+        onClick = if (editing) ({ onCycleSaveProf(ability) }) else null
+    )
+}
+
+/**
+ * Ruleset-aware skills layout. 5e gives a single box with all 18 skills;
+ * 2024 splits them by governing ability into separate boxes (CON skipped
+ * since it has no skills in either edition).
+ */
+@Composable
+private fun SkillsGroup(
     character: Character,
     editing: Boolean,
     onCycleSkillProf: (Skill) -> Unit
 ) {
-    Column {
-        for (skill in Skill.entries) {
-            StatRow(
-                label = "${skill.display}  (${skill.ability.abbr})",
-                bonus = SkillCalculator.bonus(character, skill),
-                proficiencyTier = character.proficiencies[skill],
-                isOverridden = SkillCalculator.isOverridden(character, skill),
-                onClick = if (editing) ({ onCycleSkillProf(skill) }) else null
-            )
+    if (character.ruleset == Ruleset.DND_5E_2014) {
+        SheetBox(title = "Skills") {
+            for (skill in Skill.entries) {
+                SkillRow(character, skill, editing, onCycleSkillProf, showAbility = true)
+            }
+        }
+    } else {
+        val byAbility = Skill.entries.groupBy { it.ability }
+        Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            // Stable order matches the abilities grid; CON has no skills so
+            // it doesn't get a box.
+            listOf(Ability.STR, Ability.DEX, Ability.INT, Ability.WIS, Ability.CHA).forEach { ab ->
+                val skills = byAbility[ab].orEmpty()
+                if (skills.isEmpty()) return@forEach
+                SheetBox(title = "${ab.abbr} Skills") {
+                    skills.forEach { skill ->
+                        SkillRow(character, skill, editing, onCycleSkillProf, showAbility = false)
+                    }
+                }
+            }
         }
     }
+}
+
+@Composable
+private fun SkillRow(
+    character: Character,
+    skill: Skill,
+    editing: Boolean,
+    onCycleSkillProf: (Skill) -> Unit,
+    showAbility: Boolean
+) {
+    StatRow(
+        label = if (showAbility) "${skill.display}  (${skill.ability.abbr})" else skill.display,
+        bonus = SkillCalculator.bonus(character, skill),
+        proficiencyTier = character.proficiencies[skill],
+        isOverridden = SkillCalculator.isOverridden(character, skill),
+        onClick = if (editing) ({ onCycleSkillProf(skill) }) else null
+    )
 }
 
 @Composable
@@ -707,14 +821,16 @@ private fun HitDiceSection(
         (character.hitDiceRemaining[size] ?: max) < max
     }
 
-    Column {
+    SheetBox {
+        // Title row with a Reset affordance on the right that appears only
+        // when anything is spent — keeps the box clean during normal play.
         Row(
             modifier = Modifier.fillMaxWidth(),
             verticalAlignment = Alignment.CenterVertically
         ) {
             Text(
                 text = "Hit Dice",
-                style = MaterialTheme.typography.titleLarge,
+                style = MaterialTheme.typography.titleMedium,
                 fontWeight = FontWeight.SemiBold,
                 modifier = Modifier.weight(1f)
             )
@@ -722,10 +838,6 @@ private fun HitDiceSection(
                 TextButton(onClick = onRestoreAll) { Text("Reset") }
             }
         }
-        HorizontalDivider(
-            modifier = Modifier.padding(top = 4.dp, bottom = 6.dp),
-            color = MaterialTheme.colorScheme.outline.copy(alpha = 0.5f)
-        )
         maxByDie.entries.sortedBy { it.key }.forEach { (dieSize, max) ->
             val available = character.hitDiceRemaining[dieSize] ?: max
             HitDieRow(

@@ -6,13 +6,24 @@ annotation over the sheet.
 
 ## Current state
 
+**Commit 5 — boxify + hit dice + ruleset-aware layout.** Every grouped
+statistic now lives in its own `SheetBox` (bordered rounded container).
+Skills and saves branch on the character's ruleset: 5e keeps everything
+in single boxes; 2024 puts each save in its own box (3×2 grid under the
+ability scores) and splits skills by governing ability into one box per
+ability. Hit dice get their own box with per-die-type spend/restore
+controls and a Reset affordance that appears only when dice are spent.
+The boxified layout sets up commit 6, where each box will become a
+draggable, repositionable unit.
+
 **Commit 4 — core-sheet editing.** A pencil icon in the top app bar
 toggles edit mode. In edit mode the title bar tints, header fields
 become tappable, an inline class editor appears, the HP and ability
 blocks become tappable, and skill / save rows cycle through
-NONE → HALF → PROFICIENT → EXPERTISE on tap. Every edit flows through
-the ViewModel into the repository, which bumps `revision` + `updatedAt`
-so other observers see the change immediately.
+NONE → HALF → PROFICIENT → EXPERTISE on tap. Plus quick HP heal/damage
+buttons under the HP chip (always available, no edit-mode required) and
+a tap-spam guard on navigation so back-button mashing can't softlock
+into a blank screen.
 
 **Commit 3 — first real Compose UI.** Two screens: a character list with
 create/duplicate/delete, and a read-only character overview that renders
