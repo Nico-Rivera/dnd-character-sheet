@@ -30,6 +30,7 @@ import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
 import androidx.compose.material3.TopAppBarDefaults
 import androidx.compose.runtime.Composable
@@ -137,6 +138,15 @@ fun CharacterOverviewScreen(
                     },
                     onRemoveClass = { className ->
                         viewModel.update { it.removeClass(className) }
+                    },
+                    onSpendHitDie = { die ->
+                        viewModel.update { it.adjustHitDie(die, -1) }
+                    },
+                    onRestoreHitDie = { die ->
+                        viewModel.update { it.adjustHitDie(die, +1) }
+                    },
+                    onRestoreAllHitDice = {
+                        viewModel.update { it.copy(hitDiceRemaining = emptyMap()) }
                     }
                 )
             }
@@ -260,7 +270,10 @@ private fun SheetBody(
     onCycleSkillProf: (Skill) -> Unit,
     onCycleSaveProf: (Ability) -> Unit,
     onLevel: (className: String, delta: Int) -> Unit,
-    onRemoveClass: (className: String) -> Unit
+    onRemoveClass: (className: String) -> Unit,
+    onSpendHitDie: (dieSize: Int) -> Unit,
+    onRestoreHitDie: (dieSize: Int) -> Unit,
+    onRestoreAllHitDice: () -> Unit
 ) {
     Column(
         modifier = Modifier
@@ -283,6 +296,12 @@ private fun SheetBody(
             )
         }
         VitalsRow(character, editing, onOpenDialog)
+        HitDiceSection(
+            character = character,
+            onSpend = onSpendHitDie,
+            onRestore = onRestoreHitDie,
+            onRestoreAll = onRestoreAllHitDice
+        )
         SectionHeader("Abilities")
         AbilitiesGrid(character, editing, onOpenDialog)
         SectionHeader("Saving Throws")
@@ -658,6 +677,104 @@ private fun SectionHeader(text: String) {
     }
 }
 
+/**
+ * Per spec §3 hit dice live with the rest of the combat-relevant vitals.
+ * Max per die size is derived from the character's classes (sum of levels
+ * for classes sharing that hit die), and available comes from
+ * `character.hitDiceRemaining`, defaulting to max when the map is missing
+ * an entry. Storing only "spent" state in the map keeps freshly created
+ * characters at full hit dice without an init migration.
+ *
+ * Both buttons are always tappable — short rests are play-time actions
+ * that shouldn't require entering edit mode. The Reset affordance in the
+ * header restores everything to max for long rests; finer long-rest
+ * mechanics (half recovery, etc.) can land when the rest system grows.
+ */
+@Composable
+private fun HitDiceSection(
+    character: Character,
+    onSpend: (dieSize: Int) -> Unit,
+    onRestore: (dieSize: Int) -> Unit,
+    onRestoreAll: () -> Unit
+) {
+    if (character.classes.isEmpty()) return
+
+    val maxByDie: Map<Int, Int> = character.classes
+        .groupBy { it.hitDie }
+        .mapValues { (_, classes) -> classes.sumOf { it.level } }
+
+    val anySpent = maxByDie.any { (size, max) ->
+        (character.hitDiceRemaining[size] ?: max) < max
+    }
+
+    Column {
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Text(
+                text = "Hit Dice",
+                style = MaterialTheme.typography.titleLarge,
+                fontWeight = FontWeight.SemiBold,
+                modifier = Modifier.weight(1f)
+            )
+            if (anySpent) {
+                TextButton(onClick = onRestoreAll) { Text("Reset") }
+            }
+        }
+        HorizontalDivider(
+            modifier = Modifier.padding(top = 4.dp, bottom = 6.dp),
+            color = MaterialTheme.colorScheme.outline.copy(alpha = 0.5f)
+        )
+        maxByDie.entries.sortedBy { it.key }.forEach { (dieSize, max) ->
+            val available = character.hitDiceRemaining[dieSize] ?: max
+            HitDieRow(
+                dieSize = dieSize,
+                available = available,
+                max = max,
+                onSpend = { onSpend(dieSize) },
+                onRestore = { onRestore(dieSize) }
+            )
+        }
+    }
+}
+
+@Composable
+private fun HitDieRow(
+    dieSize: Int,
+    available: Int,
+    max: Int,
+    onSpend: () -> Unit,
+    onRestore: () -> Unit
+) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(vertical = 4.dp),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        IconButton(onClick = onSpend, enabled = available > 0) {
+            Icon(Icons.Default.Remove, contentDescription = "Spend a d$dieSize")
+        }
+        Text(
+            text = "$available / $max",
+            style = MaterialTheme.typography.titleMedium,
+            fontWeight = FontWeight.SemiBold,
+            modifier = Modifier.width(64.dp),
+            textAlign = androidx.compose.ui.text.style.TextAlign.Center
+        )
+        Text(
+            text = "d$dieSize",
+            style = MaterialTheme.typography.bodyLarge,
+            modifier = Modifier.weight(1f),
+            color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.7f)
+        )
+        IconButton(onClick = onRestore, enabled = available < max) {
+            Icon(Icons.Default.Add, contentDescription = "Restore a d$dieSize")
+        }
+    }
+}
+
 private fun classLine(character: Character): String {
     if (character.classes.isEmpty()) return "Classless"
     return character.classes.joinToString(" / ") { cl ->
@@ -720,6 +837,21 @@ private fun Character.adjustLevel(className: String, delta: Int): Character {
 
 private fun Character.removeClass(className: String): Character =
     copy(classes = classes.filterNot { it.className == className })
+
+/**
+ * Adjusts hit-dice remaining for a single die size by [delta] (−1 to spend,
+ * +1 to restore). The map only stores values that diverge from "full" so
+ * an untouched character keeps the map empty. Clamps to [0, max] where
+ * max is the sum of class levels with this hit die.
+ */
+private fun Character.adjustHitDie(dieSize: Int, delta: Int): Character {
+    val maxForDie = classes.filter { it.hitDie == dieSize }.sumOf { it.level }
+    if (maxForDie == 0) return this
+    val current = hitDiceRemaining[dieSize] ?: maxForDie
+    val updated = (current + delta).coerceIn(0, maxForDie)
+    if (updated == current) return this
+    return copy(hitDiceRemaining = hitDiceRemaining + (dieSize to updated))
+}
 
 @Composable
 private fun vmFromContainer(characterId: String): CharacterOverviewViewModel {
