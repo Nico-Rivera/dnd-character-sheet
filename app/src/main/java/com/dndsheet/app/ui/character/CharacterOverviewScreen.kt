@@ -51,6 +51,10 @@ import com.dndsheet.app.ui.character.components.AbilityScoreBlock
 import com.dndsheet.app.ui.character.components.PinnedIndicator
 import com.dndsheet.app.ui.character.components.SheetBox
 import com.dndsheet.app.ui.character.components.StatRow
+import com.dndsheet.app.ui.character.layout.BoxId
+import com.dndsheet.app.ui.character.layout.SheetCanvas
+import com.dndsheet.app.ui.character.layout.defaultRows
+import com.dndsheet.app.ui.character.layout.draggableBox
 import com.dndsheet.app.ui.character.edit.ActiveDialog
 import com.dndsheet.app.ui.character.edit.AddClassDialog
 import com.dndsheet.app.ui.character.edit.AlignmentDialog
@@ -66,8 +70,10 @@ import com.dndsheet.domain.enums.ProficiencyLevel
 import com.dndsheet.domain.enums.Ruleset
 import com.dndsheet.domain.enums.Skill
 import com.dndsheet.domain.model.AbilityScores
+import com.dndsheet.domain.model.BoxPosition
 import com.dndsheet.domain.model.Character
 import com.dndsheet.domain.model.ClassLevel
+import com.dndsheet.domain.model.SheetLayout
 import com.dndsheet.rules.AbilityCalculator
 import com.dndsheet.rules.PassiveCalculator
 import com.dndsheet.rules.ProficiencyCalculator
@@ -148,6 +154,9 @@ fun CharacterOverviewScreen(
                     },
                     onRestoreAllHitDice = {
                         viewModel.update { it.copy(hitDiceRemaining = emptyMap()) }
+                    },
+                    onPersistLayout = { positions ->
+                        viewModel.update { it.copy(layout = SheetLayout(positions)) }
                     }
                 )
             }
@@ -274,21 +283,59 @@ private fun SheetBody(
     onRemoveClass: (className: String) -> Unit,
     onSpendHitDie: (dieSize: Int) -> Unit,
     onRestoreHitDie: (dieSize: Int) -> Unit,
-    onRestoreAllHitDice: () -> Unit
+    onRestoreAllHitDice: () -> Unit,
+    onPersistLayout: (Map<String, BoxPosition>) -> Unit
 ) {
+    val pb = ProficiencyCalculator.bonus(character)
+    val pbOver = ProficiencyCalculator.isOverridden(character)
+    val initiative = PassiveCalculator.initiative(character)
+    val initOver = character.overrides.initiative != null
+
+    // The canvas reads positions from local state during a drag so each frame
+    // is cheap; the persisted character is only touched once per drag (on
+    // release) via onCommit. Reset whenever the character id changes — and
+    // re-sync from the persisted layout when it changes underneath us (a save
+    // bumps revision), so an external edit doesn't get stranded.
+    var workingPositions by remember(character.id) {
+        mutableStateOf(character.layout.positions)
+    }
+    androidx.compose.runtime.LaunchedEffect(character.layout.positions) {
+        workingPositions = character.layout.positions
+    }
+
+    val onMove: (BoxId, Float, Float) -> Unit = { id, x, y ->
+        val prev = workingPositions[id.name] ?: BoxPosition()
+        // Clamp to canvas-coordinate floor so a box can't be dragged above the
+        // canvas top or off the left edge. In edit mode the identity/class editor
+        // sections push the canvas down, giving the user room to drag a box into
+        // that space; without clamping the stored y goes negative, which leaves
+        // the box above the viewport once those sections collapse in read mode.
+        workingPositions = workingPositions + (id.name to prev.copy(
+            x = x.coerceAtLeast(0f),
+            y = y.coerceAtLeast(0f)
+        ))
+    }
+    val onCommit: () -> Unit = { onPersistLayout(workingPositions) }
+
     Column(
         modifier = Modifier
             .fillMaxSize()
             .verticalScroll(rememberScrollState())
             .padding(horizontal = 16.dp, vertical = 12.dp),
-        verticalArrangement = Arrangement.spacedBy(16.dp)
+        verticalArrangement = Arrangement.spacedBy(12.dp)
     ) {
-        HeaderBlock(
-            character = character,
-            editing = editing,
-            onOpenDialog = onOpenDialog
-        )
+        // Identity and class editors are editing tools, not sheet boxes, so
+        // they live above the canvas and aren't part of the draggable layout.
+        // Crucially, keeping them out of the canvas means the canvas geometry
+        // is identical in edit and read mode — so a box dragged to an absolute
+        // position lands in the same spot in both modes (an in-canvas editor
+        // that grew/shrank with the mode would shift moved boxes by its height
+        // difference).
         if (editing) {
+            IdentityEditorSection(
+                character = character,
+                onOpenDialog = onOpenDialog
+            )
             ClassEditorSection(
                 classes = character.classes,
                 onAdd = { onOpenDialog(ActiveDialog.AddClass) },
@@ -296,92 +343,183 @@ private fun SheetBody(
                 onRemove = onRemoveClass
             )
         }
-        VitalsRow(character, editing, onOpenDialog)
-        HitDiceSection(
-            character = character,
-            onSpend = onSpendHitDie,
-            onRestore = onRestoreHitDie,
-            onRestoreAll = onRestoreAllHitDice
-        )
-        // Each ability is already its own bordered block, so no outer SheetBox
-        // wraps them — that keeps every ability as an independent unit for
-        // the drag-to-reposition commit.
-        AbilitiesGrid(character, editing, onOpenDialog)
-        SavesGroup(character, editing, onCycleSaveProf)
-        SkillsGroup(character, editing, onCycleSkillProf)
-        SheetBox(title = "Passives") {
-            PassivesSection(character)
-        }
-        if (character.conditions.isNotEmpty()) {
-            SheetBox(title = "Conditions") {
-                Text(
-                    text = character.conditions.joinToString(", "),
-                    style = MaterialTheme.typography.bodyMedium
+
+        SheetCanvas(
+            positions = workingPositions,
+            rows = defaultRows(character.ruleset),
+            modifier = Modifier.fillMaxWidth()
+        ) {
+            HeaderBlock(
+                character = character,
+                modifier = Modifier.draggableBox(BoxId.HEADER, editing, onMove, onCommit)
+            )
+
+            VitalChip("Level", character.totalLevel.toString(), false,
+                modifier = Modifier.draggableBox(BoxId.VITALS_LEVEL, editing, onMove, onCommit))
+            VitalChip("Prof", formatModifier(pb), pbOver,
+                modifier = Modifier.draggableBox(BoxId.VITALS_PROF, editing, onMove, onCommit))
+            VitalChip("Init", formatModifier(initiative), initOver,
+                modifier = Modifier.draggableBox(BoxId.VITALS_INIT, editing, onMove, onCommit))
+            HpBox(
+                current = character.currentHp,
+                max = character.maxHp,
+                modifier = Modifier.draggableBox(BoxId.VITALS_HP, editing, onMove, onCommit),
+                onEdit = if (editing) ({ onOpenDialog(ActiveDialog.EditHp) }) else null,
+                onDamage = { onOpenDialog(ActiveDialog.AdjustHp(isHeal = false)) },
+                onHeal = { onOpenDialog(ActiveDialog.AdjustHp(isHeal = true)) }
+            )
+
+            if (character.classes.isNotEmpty()) {
+                HitDiceBox(
+                    character = character,
+                    onSpend = onSpendHitDie,
+                    onRestore = onRestoreHitDie,
+                    onRestoreAll = onRestoreAllHitDice,
+                    modifier = Modifier.draggableBox(BoxId.HIT_DICE, editing, onMove, onCommit)
                 )
             }
+
+            Ability.entries.forEach { ability ->
+                AbilityScoreBlock(
+                    label = ability.abbr,
+                    score = character.abilityScores[ability],
+                    abilityMod = AbilityCalculator.modifier(character, ability),
+                    isOverridden = AbilityCalculator.isOverridden(character, ability),
+                    modifier = Modifier.draggableBox(abilityBoxId(ability), editing, onMove, onCommit),
+                    onClick = if (editing) ({ onOpenDialog(ActiveDialog.EditAbility(ability)) }) else null
+                )
+            }
+
+            SavesBoxes(character, editing, onCycleSaveProf, onMove, onCommit)
+            SkillsBoxes(character, editing, onCycleSkillProf, onMove, onCommit)
+
+            SheetBox(
+                title = "Passives",
+                modifier = Modifier.draggableBox(BoxId.PASSIVES, editing, onMove, onCommit)
+            ) {
+                PassivesSection(character)
+            }
+
+            if (character.conditions.isNotEmpty()) {
+                SheetBox(
+                    title = "Conditions",
+                    modifier = Modifier.draggableBox(BoxId.CONDITIONS, editing, onMove, onCommit)
+                ) {
+                    Text(
+                        text = character.conditions.joinToString(", "),
+                        style = MaterialTheme.typography.bodyMedium
+                    )
+                }
+            }
         }
-        Spacer(Modifier.height(24.dp))
     }
 }
 
+private fun abilityBoxId(a: Ability): BoxId = when (a) {
+    Ability.STR -> BoxId.ABILITY_STR
+    Ability.DEX -> BoxId.ABILITY_DEX
+    Ability.CON -> BoxId.ABILITY_CON
+    Ability.INT -> BoxId.ABILITY_INT
+    Ability.WIS -> BoxId.ABILITY_WIS
+    Ability.CHA -> BoxId.ABILITY_CHA
+}
+
+private fun saveBoxId(a: Ability): BoxId = when (a) {
+    Ability.STR -> BoxId.SAVE_STR
+    Ability.DEX -> BoxId.SAVE_DEX
+    Ability.CON -> BoxId.SAVE_CON
+    Ability.INT -> BoxId.SAVE_INT
+    Ability.WIS -> BoxId.SAVE_WIS
+    Ability.CHA -> BoxId.SAVE_CHA
+}
+
+private fun skillsBoxId(a: Ability): BoxId = when (a) {
+    Ability.STR -> BoxId.SKILLS_STR
+    Ability.DEX -> BoxId.SKILLS_DEX
+    Ability.INT -> BoxId.SKILLS_INT
+    Ability.WIS -> BoxId.SKILLS_WIS
+    Ability.CHA -> BoxId.SKILLS_CHA
+    Ability.CON -> error("CON has no skills box")
+}
+
+/**
+ * The in-canvas identity box. Renders the same compact display in both edit
+ * and read mode so the box never changes height — that height stability is
+ * what lets dragged boxes keep their absolute positions across an edit-mode
+ * toggle. Identity *editing* lives in [IdentityEditorSection], above the
+ * canvas, alongside the class editor.
+ */
 @Composable
 private fun HeaderBlock(
     character: Character,
-    editing: Boolean,
-    onOpenDialog: (ActiveDialog) -> Unit
+    modifier: Modifier = Modifier
 ) {
-    Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
-        if (editing) {
-            // Show name as a tappable line — the name in the title bar is
-            // bound to the same field so it updates everywhere on edit.
-            EditableLine(
-                label = "Name",
-                value = character.name.ifBlank { "(unnamed)" },
-                onClick = { onOpenDialog(ActiveDialog.EditName) }
-            )
-            EditableLine(
-                label = "Species",
-                value = character.species.ifBlank { "(none)" },
-                onClick = { onOpenDialog(ActiveDialog.EditSpecies) }
-            )
-            EditableLine(
-                label = "Background",
-                value = character.background.ifBlank { "(none)" },
-                onClick = { onOpenDialog(ActiveDialog.EditBackground) }
-            )
-            EditableLine(
-                label = "Alignment",
-                value = character.alignment.display,
-                onClick = { onOpenDialog(ActiveDialog.EditAlignment) }
-            )
-            EditableLine(
-                label = "Ruleset",
-                value = character.ruleset.display,
-                onClick = { onOpenDialog(ActiveDialog.EditRuleset) }
-            )
-        } else {
+    Column(
+        modifier = modifier.fillMaxWidth(),
+        verticalArrangement = Arrangement.spacedBy(2.dp)
+    ) {
+        Text(
+            text = classLine(character),
+            style = MaterialTheme.typography.titleMedium
+        )
+        val sub = listOfNotNull(
+            character.species.takeIf { it.isNotBlank() },
+            character.background.takeIf { it.isNotBlank() },
+            character.alignment.display.takeIf { character.alignment != AlignmentEnum.UNALIGNED }
+        ).joinToString(" • ")
+        if (sub.isNotBlank()) {
             Text(
-                text = classLine(character),
-                style = MaterialTheme.typography.titleMedium
-            )
-            val sub = listOfNotNull(
-                character.species.takeIf { it.isNotBlank() },
-                character.background.takeIf { it.isNotBlank() },
-                character.alignment.display.takeIf { character.alignment != AlignmentEnum.UNALIGNED }
-            ).joinToString(" • ")
-            if (sub.isNotBlank()) {
-                Text(
-                    text = sub,
-                    style = MaterialTheme.typography.bodyMedium,
-                    color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.7f)
-                )
-            }
-            Text(
-                text = character.ruleset.display,
-                style = MaterialTheme.typography.labelSmall,
-                color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.5f)
+                text = sub,
+                style = MaterialTheme.typography.bodyMedium,
+                color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.7f)
             )
         }
+        Text(
+            text = character.ruleset.display,
+            style = MaterialTheme.typography.labelSmall,
+            color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.5f)
+        )
+    }
+}
+
+/**
+ * Identity editing tool shown above the canvas in edit mode. Mirrors the
+ * [ClassEditorSection] pattern: it's not a sheet box and isn't draggable, so
+ * it can grow as tall as it needs without affecting the canvas layout. The
+ * name field also drives the title bar, so edits there update everywhere.
+ */
+@Composable
+private fun IdentityEditorSection(
+    character: Character,
+    onOpenDialog: (ActiveDialog) -> Unit
+) {
+    Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+        SectionHeader("Identity")
+        EditableLine(
+            label = "Name",
+            value = character.name.ifBlank { "(unnamed)" },
+            onClick = { onOpenDialog(ActiveDialog.EditName) }
+        )
+        EditableLine(
+            label = "Species",
+            value = character.species.ifBlank { "(none)" },
+            onClick = { onOpenDialog(ActiveDialog.EditSpecies) }
+        )
+        EditableLine(
+            label = "Background",
+            value = character.background.ifBlank { "(none)" },
+            onClick = { onOpenDialog(ActiveDialog.EditBackground) }
+        )
+        EditableLine(
+            label = "Alignment",
+            value = character.alignment.display,
+            onClick = { onOpenDialog(ActiveDialog.EditAlignment) }
+        )
+        EditableLine(
+            label = "Ruleset",
+            value = character.ruleset.display,
+            onClick = { onOpenDialog(ActiveDialog.EditRuleset) }
+        )
     }
 }
 
@@ -482,42 +620,6 @@ private fun ClassEditorRow(
     }
 }
 
-@Composable
-private fun VitalsRow(
-    character: Character,
-    editing: Boolean,
-    onOpenDialog: (ActiveDialog) -> Unit
-) {
-    val pb = ProficiencyCalculator.bonus(character)
-    val pbOver = ProficiencyCalculator.isOverridden(character)
-    val initiative = PassiveCalculator.initiative(character)
-    val initOver = character.overrides.initiative != null
-
-    // Top-aligned so the taller HP box doesn't stretch the three short chips
-    // into ugly empty space — they sit at the top, HP grows downward to fit
-    // its heal/damage buttons.
-    Row(
-        modifier = Modifier.fillMaxWidth(),
-        horizontalArrangement = Arrangement.SpaceBetween,
-        verticalAlignment = Alignment.Top
-    ) {
-        VitalChip("Level", character.totalLevel.toString(), false, modifier = Modifier.weight(1f))
-        Spacer(Modifier.width(8.dp))
-        VitalChip("Prof", formatModifier(pb), pbOver, modifier = Modifier.weight(1f))
-        Spacer(Modifier.width(8.dp))
-        VitalChip("Init", formatModifier(initiative), initOver, modifier = Modifier.weight(1f))
-        Spacer(Modifier.width(8.dp))
-        HpBox(
-            current = character.currentHp,
-            max = character.maxHp,
-            modifier = Modifier.weight(1f),
-            onEdit = if (editing) ({ onOpenDialog(ActiveDialog.EditHp) }) else null,
-            onDamage = { onOpenDialog(ActiveDialog.AdjustHp(isHeal = false)) },
-            onHeal = { onOpenDialog(ActiveDialog.AdjustHp(isHeal = true)) }
-        )
-    }
-}
-
 /**
  * HP is treated as one unit: label, current/max value, and the two heal/damage
  * buttons all live inside the same box so the box acts as a single draggable
@@ -608,76 +710,37 @@ private fun VitalChip(
     }
 }
 
-@Composable
-private fun AbilitiesGrid(
-    character: Character,
-    editing: Boolean,
-    onOpenDialog: (ActiveDialog) -> Unit
-) {
-    val rows = listOf(
-        listOf(Ability.STR, Ability.DEX, Ability.CON),
-        listOf(Ability.INT, Ability.WIS, Ability.CHA)
-    )
-    Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-        for (row in rows) {
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.SpaceEvenly
-            ) {
-                for (ability in row) {
-                    AbilityScoreBlock(
-                        label = ability.abbr,
-                        score = character.abilityScores[ability],
-                        abilityMod = AbilityCalculator.modifier(character, ability),
-                        isOverridden = AbilityCalculator.isOverridden(character, ability),
-                        onClick = if (editing) ({ onOpenDialog(ActiveDialog.EditAbility(ability)) }) else null
-                    )
-                }
-            }
-        }
-    }
-}
-
 /**
- * Ruleset-aware saves layout. 5e groups all six saves into one box;
- * 2024 puts each save in its own box, laid out 3×2 to match the ability
- * grid above. The 2024 version reads as paired with the abilities — each
- * save sits visually beneath its ability score.
+ * Ruleset-aware saves. Emits canvas children directly (each tagged with a
+ * BoxId) rather than wrapping them in its own Row/Column — the SheetCanvas
+ * owns positioning. 5e: one box. 2024: six small boxes the canvas arranges
+ * into a 3×2 grid via [defaultRows].
  */
 @Composable
-private fun SavesGroup(
+private fun SavesBoxes(
     character: Character,
     editing: Boolean,
-    onCycleSaveProf: (Ability) -> Unit
+    onCycleSaveProf: (Ability) -> Unit,
+    onMove: (BoxId, Float, Float) -> Unit,
+    onCommit: () -> Unit
 ) {
     if (character.ruleset == Ruleset.DND_5E_2014) {
-        SheetBox(title = "Saving Throws") {
+        SheetBox(
+            title = "Saving Throws",
+            modifier = Modifier.draggableBox(BoxId.SAVES_ALL, editing, onMove, onCommit)
+        ) {
             for (ability in Ability.entries) {
                 SaveRow(character, ability, editing, onCycleSaveProf)
             }
         }
     } else {
-        // 2024: one small box per save, 3×2 grid.
-        val rows = listOf(
-            listOf(Ability.STR, Ability.DEX, Ability.CON),
-            listOf(Ability.INT, Ability.WIS, Ability.CHA)
-        )
-        Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-            for (row in rows) {
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.spacedBy(8.dp)
-                ) {
-                    for (ability in row) {
-                        SheetBox(
-                            title = "${ability.abbr} Save",
-                            modifier = Modifier.weight(1f),
-                            contentPadding = 8.dp
-                        ) {
-                            SaveRow(character, ability, editing, onCycleSaveProf, compact = true)
-                        }
-                    }
-                }
+        Ability.entries.forEach { ability ->
+            SheetBox(
+                title = "${ability.abbr} Save",
+                modifier = Modifier.draggableBox(saveBoxId(ability), editing, onMove, onCommit),
+                contentPadding = 8.dp
+            ) {
+                SaveRow(character, ability, editing, onCycleSaveProf, compact = true)
             }
         }
     }
@@ -701,34 +764,37 @@ private fun SaveRow(
 }
 
 /**
- * Ruleset-aware skills layout. 5e gives a single box with all 18 skills;
- * 2024 splits them by governing ability into separate boxes (CON skipped
- * since it has no skills in either edition).
+ * Ruleset-aware skills. 5e: one box with all 18. 2024: one box per ability
+ * (CON skipped — no skills). Each box is a direct canvas child.
  */
 @Composable
-private fun SkillsGroup(
+private fun SkillsBoxes(
     character: Character,
     editing: Boolean,
-    onCycleSkillProf: (Skill) -> Unit
+    onCycleSkillProf: (Skill) -> Unit,
+    onMove: (BoxId, Float, Float) -> Unit,
+    onCommit: () -> Unit
 ) {
     if (character.ruleset == Ruleset.DND_5E_2014) {
-        SheetBox(title = "Skills") {
+        SheetBox(
+            title = "Skills",
+            modifier = Modifier.draggableBox(BoxId.SKILLS_ALL, editing, onMove, onCommit)
+        ) {
             for (skill in Skill.entries) {
                 SkillRow(character, skill, editing, onCycleSkillProf, showAbility = true)
             }
         }
     } else {
         val byAbility = Skill.entries.groupBy { it.ability }
-        Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-            // Stable order matches the abilities grid; CON has no skills so
-            // it doesn't get a box.
-            listOf(Ability.STR, Ability.DEX, Ability.INT, Ability.WIS, Ability.CHA).forEach { ab ->
-                val skills = byAbility[ab].orEmpty()
-                if (skills.isEmpty()) return@forEach
-                SheetBox(title = "${ab.abbr} Skills") {
-                    skills.forEach { skill ->
-                        SkillRow(character, skill, editing, onCycleSkillProf, showAbility = false)
-                    }
+        listOf(Ability.STR, Ability.DEX, Ability.INT, Ability.WIS, Ability.CHA).forEach { ab ->
+            val skills = byAbility[ab].orEmpty()
+            if (skills.isEmpty()) return@forEach
+            SheetBox(
+                title = "${ab.abbr} Skills",
+                modifier = Modifier.draggableBox(skillsBoxId(ab), editing, onMove, onCommit)
+            ) {
+                skills.forEach { skill ->
+                    SkillRow(character, skill, editing, onCycleSkillProf, showAbility = false)
                 }
             }
         }
@@ -805,14 +871,13 @@ private fun SectionHeader(text: String) {
  * mechanics (half recovery, etc.) can land when the rest system grows.
  */
 @Composable
-private fun HitDiceSection(
+private fun HitDiceBox(
     character: Character,
     onSpend: (dieSize: Int) -> Unit,
     onRestore: (dieSize: Int) -> Unit,
-    onRestoreAll: () -> Unit
+    onRestoreAll: () -> Unit,
+    modifier: Modifier = Modifier
 ) {
-    if (character.classes.isEmpty()) return
-
     val maxByDie: Map<Int, Int> = character.classes
         .groupBy { it.hitDie }
         .mapValues { (_, classes) -> classes.sumOf { it.level } }
@@ -821,7 +886,7 @@ private fun HitDiceSection(
         (character.hitDiceRemaining[size] ?: max) < max
     }
 
-    SheetBox {
+    SheetBox(modifier = modifier) {
         // Title row with a Reset affordance on the right that appears only
         // when anything is spent — keeps the box clean during normal play.
         Row(
