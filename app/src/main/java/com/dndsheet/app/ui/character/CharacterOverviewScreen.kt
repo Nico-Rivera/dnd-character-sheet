@@ -52,9 +52,11 @@ import com.dndsheet.app.ui.character.components.PinnedIndicator
 import com.dndsheet.app.ui.character.components.SheetBox
 import com.dndsheet.app.ui.character.components.StatRow
 import com.dndsheet.app.ui.character.layout.BoxId
+import com.dndsheet.app.ui.character.layout.EditableSheetBox
+import com.dndsheet.app.ui.character.layout.MIN_BOX_HEIGHT_DP
+import com.dndsheet.app.ui.character.layout.MIN_BOX_WIDTH_DP
 import com.dndsheet.app.ui.character.layout.SheetCanvas
 import com.dndsheet.app.ui.character.layout.defaultRows
-import com.dndsheet.app.ui.character.layout.draggableBox
 import com.dndsheet.app.ui.character.edit.ActiveDialog
 import com.dndsheet.app.ui.character.edit.AddClassDialog
 import com.dndsheet.app.ui.character.edit.AlignmentDialog
@@ -317,6 +319,23 @@ private fun SheetBody(
     }
     val onCommit: () -> Unit = { onPersistLayout(workingPositions) }
 
+    // widthDp / heightDp are nullable: null means "leave the stored value unchanged"
+    // so a right-edge drag doesn't freeze the auto height, and vice versa.
+    val onResize: (BoxId, Float?, Float?) -> Unit = { id, w, h ->
+        val prev = workingPositions[id.name] ?: BoxPosition()
+        workingPositions = workingPositions + (id.name to prev.copy(
+            width  = w?.coerceAtLeast(MIN_BOX_WIDTH_DP)  ?: prev.width,
+            height = h?.coerceAtLeast(MIN_BOX_HEIGHT_DP) ?: prev.height
+        ))
+    }
+
+    // Z-change is a button tap, not a drag, so persist immediately.
+    val onZChange: (BoxId, Int) -> Unit = { id, delta ->
+        val prev = workingPositions[id.name] ?: BoxPosition()
+        workingPositions = workingPositions + (id.name to prev.copy(z = prev.z + delta))
+        onCommit()
+    }
+
     Column(
         modifier = Modifier
             .fillMaxSize()
@@ -349,66 +368,69 @@ private fun SheetBody(
             rows = defaultRows(character.ruleset),
             modifier = Modifier.fillMaxWidth()
         ) {
-            HeaderBlock(
-                character = character,
-                modifier = Modifier.draggableBox(BoxId.HEADER, editing, onMove, onCommit)
-            )
+            EditableSheetBox(BoxId.HEADER, editing, onMove, onResize, onZChange, onCommit) {
+                HeaderBlock(character = character)
+            }
 
-            VitalChip("Level", character.totalLevel.toString(), false,
-                modifier = Modifier.draggableBox(BoxId.VITALS_LEVEL, editing, onMove, onCommit))
-            VitalChip("Prof", formatModifier(pb), pbOver,
-                modifier = Modifier.draggableBox(BoxId.VITALS_PROF, editing, onMove, onCommit))
-            VitalChip("Init", formatModifier(initiative), initOver,
-                modifier = Modifier.draggableBox(BoxId.VITALS_INIT, editing, onMove, onCommit))
-            HpBox(
-                current = character.currentHp,
-                max = character.maxHp,
-                modifier = Modifier.draggableBox(BoxId.VITALS_HP, editing, onMove, onCommit),
-                onEdit = if (editing) ({ onOpenDialog(ActiveDialog.EditHp) }) else null,
-                onDamage = { onOpenDialog(ActiveDialog.AdjustHp(isHeal = false)) },
-                onHeal = { onOpenDialog(ActiveDialog.AdjustHp(isHeal = true)) }
-            )
+            EditableSheetBox(BoxId.VITALS_LEVEL, editing, onMove, onResize, onZChange, onCommit) {
+                VitalChip("Level", character.totalLevel.toString(), false)
+            }
+            EditableSheetBox(BoxId.VITALS_PROF, editing, onMove, onResize, onZChange, onCommit) {
+                VitalChip("Prof", formatModifier(pb), pbOver)
+            }
+            EditableSheetBox(BoxId.VITALS_INIT, editing, onMove, onResize, onZChange, onCommit) {
+                VitalChip("Init", formatModifier(initiative), initOver)
+            }
+            EditableSheetBox(BoxId.VITALS_HP, editing, onMove, onResize, onZChange, onCommit) {
+                HpBox(
+                    current = character.currentHp,
+                    max = character.maxHp,
+                    onEdit = if (editing) ({ onOpenDialog(ActiveDialog.EditHp) }) else null,
+                    onDamage = { onOpenDialog(ActiveDialog.AdjustHp(isHeal = false)) },
+                    onHeal = { onOpenDialog(ActiveDialog.AdjustHp(isHeal = true)) }
+                )
+            }
 
             if (character.classes.isNotEmpty()) {
-                HitDiceBox(
-                    character = character,
-                    onSpend = onSpendHitDie,
-                    onRestore = onRestoreHitDie,
-                    onRestoreAll = onRestoreAllHitDice,
-                    modifier = Modifier.draggableBox(BoxId.HIT_DICE, editing, onMove, onCommit)
-                )
+                EditableSheetBox(BoxId.HIT_DICE, editing, onMove, onResize, onZChange, onCommit) {
+                    HitDiceBox(
+                        character = character,
+                        onSpend = onSpendHitDie,
+                        onRestore = onRestoreHitDie,
+                        onRestoreAll = onRestoreAllHitDice
+                    )
+                }
             }
 
             Ability.entries.forEach { ability ->
-                AbilityScoreBlock(
-                    label = ability.abbr,
-                    score = character.abilityScores[ability],
-                    abilityMod = AbilityCalculator.modifier(character, ability),
-                    isOverridden = AbilityCalculator.isOverridden(character, ability),
-                    modifier = Modifier.draggableBox(abilityBoxId(ability), editing, onMove, onCommit),
-                    onClick = if (editing) ({ onOpenDialog(ActiveDialog.EditAbility(ability)) }) else null
-                )
+                EditableSheetBox(abilityBoxId(ability), editing, onMove, onResize, onZChange, onCommit) {
+                    AbilityScoreBlock(
+                        label = ability.abbr,
+                        score = character.abilityScores[ability],
+                        abilityMod = AbilityCalculator.modifier(character, ability),
+                        isOverridden = AbilityCalculator.isOverridden(character, ability),
+                        onClick = if (editing) ({ onOpenDialog(ActiveDialog.EditAbility(ability)) }) else null
+                    )
+                }
             }
 
-            SavesBoxes(character, editing, onCycleSaveProf, onMove, onCommit)
-            SkillsBoxes(character, editing, onCycleSkillProf, onMove, onCommit)
+            SavesBoxes(character, editing, onCycleSaveProf, onMove, onResize, onZChange, onCommit)
+            SkillsBoxes(character, editing, onCycleSkillProf, onMove, onResize, onZChange, onCommit)
 
-            SheetBox(
-                title = "Passives",
-                modifier = Modifier.draggableBox(BoxId.PASSIVES, editing, onMove, onCommit)
-            ) {
-                PassivesSection(character)
+            EditableSheetBox(BoxId.PASSIVES, editing, onMove, onResize, onZChange, onCommit) {
+                SheetBox(title = "Passives") {
+                    PassivesSection(character)
+                }
             }
 
             if (character.conditions.isNotEmpty()) {
-                SheetBox(
-                    title = "Conditions",
-                    modifier = Modifier.draggableBox(BoxId.CONDITIONS, editing, onMove, onCommit)
-                ) {
-                    Text(
-                        text = character.conditions.joinToString(", "),
-                        style = MaterialTheme.typography.bodyMedium
-                    )
+                EditableSheetBox(BoxId.CONDITIONS, editing, onMove, onResize, onZChange, onCommit) {
+                    SheetBox(title = "Conditions") {
+                        Text(
+                            text = character.conditions.joinToString(", "),
+                            style = MaterialTheme.typography.bodyMedium
+                        )
+                    }
                 }
             }
         }
@@ -640,6 +662,7 @@ private fun HpBox(
     val click = if (onEdit != null) Modifier.clickable(onClick = onEdit) else Modifier
     Box(
         modifier = modifier
+            .fillMaxWidth()
             .clip(RoundedCornerShape(6.dp))
             .background(MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.4f))
             .border(1.dp, MaterialTheme.colorScheme.outline, RoundedCornerShape(6.dp))
@@ -687,6 +710,7 @@ private fun VitalChip(
     val click = if (onClick != null) Modifier.clickable(onClick = onClick) else Modifier
     Box(
         modifier = modifier
+            .fillMaxWidth()
             .clip(RoundedCornerShape(6.dp))
             .background(MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.4f))
             .border(1.dp, MaterialTheme.colorScheme.outline, RoundedCornerShape(6.dp))
@@ -722,25 +746,24 @@ private fun SavesBoxes(
     editing: Boolean,
     onCycleSaveProf: (Ability) -> Unit,
     onMove: (BoxId, Float, Float) -> Unit,
+    onResize: (BoxId, Float?, Float?) -> Unit,
+    onZChange: (BoxId, Int) -> Unit,
     onCommit: () -> Unit
 ) {
     if (character.ruleset == Ruleset.DND_5E_2014) {
-        SheetBox(
-            title = "Saving Throws",
-            modifier = Modifier.draggableBox(BoxId.SAVES_ALL, editing, onMove, onCommit)
-        ) {
-            for (ability in Ability.entries) {
-                SaveRow(character, ability, editing, onCycleSaveProf)
+        EditableSheetBox(BoxId.SAVES_ALL, editing, onMove, onResize, onZChange, onCommit) {
+            SheetBox(title = "Saving Throws") {
+                for (ability in Ability.entries) {
+                    SaveRow(character, ability, editing, onCycleSaveProf)
+                }
             }
         }
     } else {
         Ability.entries.forEach { ability ->
-            SheetBox(
-                title = "${ability.abbr} Save",
-                modifier = Modifier.draggableBox(saveBoxId(ability), editing, onMove, onCommit),
-                contentPadding = 8.dp
-            ) {
-                SaveRow(character, ability, editing, onCycleSaveProf, compact = true)
+            EditableSheetBox(saveBoxId(ability), editing, onMove, onResize, onZChange, onCommit) {
+                SheetBox(title = "${ability.abbr} Save", contentPadding = 8.dp) {
+                    SaveRow(character, ability, editing, onCycleSaveProf, compact = true)
+                }
             }
         }
     }
@@ -773,15 +796,16 @@ private fun SkillsBoxes(
     editing: Boolean,
     onCycleSkillProf: (Skill) -> Unit,
     onMove: (BoxId, Float, Float) -> Unit,
+    onResize: (BoxId, Float?, Float?) -> Unit,
+    onZChange: (BoxId, Int) -> Unit,
     onCommit: () -> Unit
 ) {
     if (character.ruleset == Ruleset.DND_5E_2014) {
-        SheetBox(
-            title = "Skills",
-            modifier = Modifier.draggableBox(BoxId.SKILLS_ALL, editing, onMove, onCommit)
-        ) {
-            for (skill in Skill.entries) {
-                SkillRow(character, skill, editing, onCycleSkillProf, showAbility = true)
+        EditableSheetBox(BoxId.SKILLS_ALL, editing, onMove, onResize, onZChange, onCommit) {
+            SheetBox(title = "Skills") {
+                for (skill in Skill.entries) {
+                    SkillRow(character, skill, editing, onCycleSkillProf, showAbility = true)
+                }
             }
         }
     } else {
@@ -789,12 +813,11 @@ private fun SkillsBoxes(
         listOf(Ability.STR, Ability.DEX, Ability.INT, Ability.WIS, Ability.CHA).forEach { ab ->
             val skills = byAbility[ab].orEmpty()
             if (skills.isEmpty()) return@forEach
-            SheetBox(
-                title = "${ab.abbr} Skills",
-                modifier = Modifier.draggableBox(skillsBoxId(ab), editing, onMove, onCommit)
-            ) {
-                skills.forEach { skill ->
-                    SkillRow(character, skill, editing, onCycleSkillProf, showAbility = false)
+            EditableSheetBox(skillsBoxId(ab), editing, onMove, onResize, onZChange, onCommit) {
+                SheetBox(title = "${ab.abbr} Skills") {
+                    skills.forEach { skill ->
+                        SkillRow(character, skill, editing, onCycleSkillProf, showAbility = false)
+                    }
                 }
             }
         }
