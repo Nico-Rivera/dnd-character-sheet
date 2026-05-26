@@ -1,5 +1,12 @@
 package com.dndsheet.app.ui.character
 
+import android.content.Context
+import android.graphics.Bitmap
+import android.graphics.pdf.PdfRenderer
+import android.os.ParcelFileDescriptor
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
@@ -12,8 +19,10 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
@@ -36,11 +45,16 @@ import androidx.compose.material3.TopAppBarDefaults
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.produceState
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.asImageBitmap
+import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
@@ -53,6 +67,7 @@ import com.dndsheet.app.ui.character.components.SheetBox
 import com.dndsheet.app.ui.character.components.StatRow
 import com.dndsheet.app.ui.character.layout.BoxId
 import com.dndsheet.app.ui.character.layout.EditableSheetBox
+import com.dndsheet.app.ui.character.layout.LocalBoxFontScale
 import com.dndsheet.app.ui.character.layout.MIN_BOX_HEIGHT_DP
 import com.dndsheet.app.ui.character.layout.MIN_BOX_WIDTH_DP
 import com.dndsheet.app.ui.character.layout.SheetCanvas
@@ -74,6 +89,10 @@ import com.dndsheet.domain.enums.Skill
 import com.dndsheet.domain.model.AbilityScores
 import com.dndsheet.domain.model.BoxPosition
 import com.dndsheet.domain.model.Character
+import java.io.File
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import com.dndsheet.domain.model.ClassLevel
 import com.dndsheet.domain.model.SheetLayout
 import com.dndsheet.rules.AbilityCalculator
@@ -159,6 +178,19 @@ fun CharacterOverviewScreen(
                     },
                     onPersistLayout = { positions ->
                         viewModel.update { it.copy(layout = SheetLayout(positions)) }
+                    },
+                    onImportPdf = { path ->
+                        viewModel.update { it.copy(pdfPath = path) }
+                    },
+                    onClearPdf = {
+                        viewModel.update { it.copy(pdfPath = null) }
+                    },
+                    onTogglePassive = { skill ->
+                        viewModel.update { c ->
+                            val updated = if (skill in c.passiveSkills) c.passiveSkills - skill
+                                          else c.passiveSkills + skill
+                            c.copy(passiveSkills = updated)
+                        }
                     }
                 )
             }
@@ -286,8 +318,31 @@ private fun SheetBody(
     onSpendHitDie: (dieSize: Int) -> Unit,
     onRestoreHitDie: (dieSize: Int) -> Unit,
     onRestoreAllHitDice: () -> Unit,
-    onPersistLayout: (Map<String, BoxPosition>) -> Unit
+    onPersistLayout: (Map<String, BoxPosition>) -> Unit,
+    onImportPdf: (pdfPath: String) -> Unit,
+    onClearPdf: () -> Unit,
+    onTogglePassive: (Skill) -> Unit
 ) {
+    val context = LocalContext.current
+    val scope   = rememberCoroutineScope()
+
+    // Launch the system file picker for PDF files. On selection, copy the
+    // file into the app's private storage so the reference stays stable even
+    // if the user later moves or deletes the original.
+    val importPdfLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.GetContent()
+    ) { uri ->
+        uri ?: return@rememberLauncherForActivityResult
+        scope.launch(Dispatchers.IO) {
+            val dest = File(context.filesDir, "pdfs/${character.id}.pdf")
+            dest.parentFile?.mkdirs()
+            context.contentResolver.openInputStream(uri)?.use { input ->
+                dest.outputStream().use { output -> input.copyTo(output) }
+            }
+            onImportPdf(dest.absolutePath)
+        }
+    }
+
     val pb = ProficiencyCalculator.bonus(character)
     val pbOver = ProficiencyCalculator.isOverridden(character)
     val initiative = PassiveCalculator.initiative(character)
@@ -336,6 +391,15 @@ private fun SheetBody(
         onCommit()
     }
 
+    // Font-scale is also a button tap — steps 0.1f, range 0.5..2.0, persisted immediately.
+    val fontScaleFor: (BoxId) -> Float = { id -> workingPositions[id.name]?.fontScale ?: 1f }
+    val onFontScale: (BoxId, Int) -> Unit = { id, delta ->
+        val prev = workingPositions[id.name] ?: BoxPosition()
+        val newScale = (prev.fontScale + delta * 0.1f).coerceIn(0.5f, 2.0f)
+        workingPositions = workingPositions + (id.name to prev.copy(fontScale = newScale))
+        onCommit()
+    }
+
     Column(
         modifier = Modifier
             .fillMaxSize()
@@ -361,27 +425,39 @@ private fun SheetBody(
                 onLevel = onLevel,
                 onRemove = onRemoveClass
             )
+            PdfSection(
+                pdfPath = character.pdfPath,
+                onImportClick = { importPdfLauncher.launch("application/pdf") },
+                onClearClick = onClearPdf
+            )
         }
+
+        // PDF background (if set) renders behind the boxes inside a shared
+        // Box so both scroll together in the parent Column.
+        Box(modifier = Modifier.fillMaxWidth()) {
+            character.pdfPath?.let { path ->
+                PdfBackground(pdfPath = path, modifier = Modifier.fillMaxWidth())
+            }
 
         SheetCanvas(
             positions = workingPositions,
             rows = defaultRows(character.ruleset),
             modifier = Modifier.fillMaxWidth()
         ) {
-            EditableSheetBox(BoxId.HEADER, editing, onMove, onResize, onZChange, onCommit) {
+            EditableSheetBox(BoxId.HEADER, editing, onMove, onResize, onZChange, onFontScale, fontScaleFor(BoxId.HEADER), onCommit) {
                 HeaderBlock(character = character)
             }
 
-            EditableSheetBox(BoxId.VITALS_LEVEL, editing, onMove, onResize, onZChange, onCommit) {
+            EditableSheetBox(BoxId.VITALS_LEVEL, editing, onMove, onResize, onZChange, onFontScale, fontScaleFor(BoxId.VITALS_LEVEL), onCommit) {
                 VitalChip("Level", character.totalLevel.toString(), false)
             }
-            EditableSheetBox(BoxId.VITALS_PROF, editing, onMove, onResize, onZChange, onCommit) {
+            EditableSheetBox(BoxId.VITALS_PROF, editing, onMove, onResize, onZChange, onFontScale, fontScaleFor(BoxId.VITALS_PROF), onCommit) {
                 VitalChip("Prof", formatModifier(pb), pbOver)
             }
-            EditableSheetBox(BoxId.VITALS_INIT, editing, onMove, onResize, onZChange, onCommit) {
+            EditableSheetBox(BoxId.VITALS_INIT, editing, onMove, onResize, onZChange, onFontScale, fontScaleFor(BoxId.VITALS_INIT), onCommit) {
                 VitalChip("Init", formatModifier(initiative), initOver)
             }
-            EditableSheetBox(BoxId.VITALS_HP, editing, onMove, onResize, onZChange, onCommit) {
+            EditableSheetBox(BoxId.VITALS_HP, editing, onMove, onResize, onZChange, onFontScale, fontScaleFor(BoxId.VITALS_HP), onCommit) {
                 HpBox(
                     current = character.currentHp,
                     max = character.maxHp,
@@ -392,7 +468,7 @@ private fun SheetBody(
             }
 
             if (character.classes.isNotEmpty()) {
-                EditableSheetBox(BoxId.HIT_DICE, editing, onMove, onResize, onZChange, onCommit) {
+                EditableSheetBox(BoxId.HIT_DICE, editing, onMove, onResize, onZChange, onFontScale, fontScaleFor(BoxId.HIT_DICE), onCommit) {
                     HitDiceBox(
                         character = character,
                         onSpend = onSpendHitDie,
@@ -403,7 +479,7 @@ private fun SheetBody(
             }
 
             Ability.entries.forEach { ability ->
-                EditableSheetBox(abilityBoxId(ability), editing, onMove, onResize, onZChange, onCommit) {
+                EditableSheetBox(abilityBoxId(ability), editing, onMove, onResize, onZChange, onFontScale, fontScaleFor(abilityBoxId(ability)), onCommit) {
                     AbilityScoreBlock(
                         label = ability.abbr,
                         score = character.abilityScores[ability],
@@ -414,17 +490,20 @@ private fun SheetBody(
                 }
             }
 
-            SavesBoxes(character, editing, onCycleSaveProf, onMove, onResize, onZChange, onCommit)
-            SkillsBoxes(character, editing, onCycleSkillProf, onMove, onResize, onZChange, onCommit)
+            SavesBoxes(character, editing, onCycleSaveProf, onCycleSkillProf, onMove, onResize, onZChange, onFontScale, fontScaleFor, onCommit)
+            // 2024 skills are rendered inside SavesBoxes (combined per-ability box)
+            if (character.ruleset == Ruleset.DND_5E_2014) {
+                SkillsBoxes(character, editing, onCycleSkillProf, onMove, onResize, onZChange, onFontScale, fontScaleFor, onCommit)
+            }
 
-            EditableSheetBox(BoxId.PASSIVES, editing, onMove, onResize, onZChange, onCommit) {
+            EditableSheetBox(BoxId.PASSIVES, editing, onMove, onResize, onZChange, onFontScale, fontScaleFor(BoxId.PASSIVES), onCommit) {
                 SheetBox(title = "Passives") {
-                    PassivesSection(character)
+                    PassivesSection(character, editing, onTogglePassive)
                 }
             }
 
             if (character.conditions.isNotEmpty()) {
-                EditableSheetBox(BoxId.CONDITIONS, editing, onMove, onResize, onZChange, onCommit) {
+                EditableSheetBox(BoxId.CONDITIONS, editing, onMove, onResize, onZChange, onFontScale, fontScaleFor(BoxId.CONDITIONS), onCommit) {
                     SheetBox(title = "Conditions") {
                         Text(
                             text = character.conditions.joinToString(", "),
@@ -434,6 +513,7 @@ private fun SheetBody(
                 }
             }
         }
+        } // end PDF+canvas Box
     }
 }
 
@@ -476,10 +556,7 @@ private fun HeaderBlock(
     character: Character,
     modifier: Modifier = Modifier
 ) {
-    Column(
-        modifier = modifier.fillMaxWidth(),
-        verticalArrangement = Arrangement.spacedBy(2.dp)
-    ) {
+    SheetBox(modifier = modifier) {
         Text(
             text = classLine(character),
             style = MaterialTheme.typography.titleMedium
@@ -493,13 +570,15 @@ private fun HeaderBlock(
             Text(
                 text = sub,
                 style = MaterialTheme.typography.bodyMedium,
-                color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.7f)
+                color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.7f),
+                modifier = Modifier.padding(top = 2.dp)
             )
         }
         Text(
             text = character.ruleset.display,
             style = MaterialTheme.typography.labelSmall,
-            color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.5f)
+            color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.5f),
+            modifier = Modifier.padding(top = 2.dp)
         )
     }
 }
@@ -664,7 +743,7 @@ private fun HpBox(
         modifier = modifier
             .fillMaxWidth()
             .clip(RoundedCornerShape(6.dp))
-            .background(MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.4f))
+            .background(MaterialTheme.colorScheme.surfaceVariant)
             .border(1.dp, MaterialTheme.colorScheme.outline, RoundedCornerShape(6.dp))
             .then(click)
             .padding(horizontal = 8.dp, vertical = 8.dp)
@@ -712,7 +791,7 @@ private fun VitalChip(
         modifier = modifier
             .fillMaxWidth()
             .clip(RoundedCornerShape(6.dp))
-            .background(MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.4f))
+            .background(MaterialTheme.colorScheme.surfaceVariant)
             .border(1.dp, MaterialTheme.colorScheme.outline, RoundedCornerShape(6.dp))
             .then(click)
             .padding(horizontal = 12.dp, vertical = 8.dp)
@@ -745,13 +824,16 @@ private fun SavesBoxes(
     character: Character,
     editing: Boolean,
     onCycleSaveProf: (Ability) -> Unit,
+    onCycleSkillProf: (Skill) -> Unit,
     onMove: (BoxId, Float, Float) -> Unit,
     onResize: (BoxId, Float?, Float?) -> Unit,
     onZChange: (BoxId, Int) -> Unit,
+    onFontScale: (BoxId, Int) -> Unit,
+    fontScaleFor: (BoxId) -> Float,
     onCommit: () -> Unit
 ) {
     if (character.ruleset == Ruleset.DND_5E_2014) {
-        EditableSheetBox(BoxId.SAVES_ALL, editing, onMove, onResize, onZChange, onCommit) {
+        EditableSheetBox(BoxId.SAVES_ALL, editing, onMove, onResize, onZChange, onFontScale, fontScaleFor(BoxId.SAVES_ALL), onCommit) {
             SheetBox(title = "Saving Throws") {
                 for (ability in Ability.entries) {
                     SaveRow(character, ability, editing, onCycleSaveProf)
@@ -759,10 +841,29 @@ private fun SavesBoxes(
             }
         }
     } else {
+        // 2024: one box per ability — save row + divider + skill rows.
+        // Uses SAVE_* BoxIds; SKILLS_* ids are retired from the default flow.
+        val byAbility = Skill.entries.groupBy { it.ability }
         Ability.entries.forEach { ability ->
-            EditableSheetBox(saveBoxId(ability), editing, onMove, onResize, onZChange, onCommit) {
-                SheetBox(title = "${ability.abbr} Save", contentPadding = 8.dp) {
-                    SaveRow(character, ability, editing, onCycleSaveProf, compact = true)
+            val skills = byAbility[ability].orEmpty()
+            EditableSheetBox(saveBoxId(ability), editing, onMove, onResize, onZChange, onFontScale, fontScaleFor(saveBoxId(ability)), onCommit) {
+                SheetBox(title = ability.abbr, contentPadding = 8.dp) {
+                    StatRow(
+                        label = "Save",
+                        bonus = SavingThrowCalculator.bonus(character, ability),
+                        proficiencyTier = character.proficiencies[ability],
+                        isOverridden = SavingThrowCalculator.isOverridden(character, ability),
+                        onClick = if (editing) ({ onCycleSaveProf(ability) }) else null
+                    )
+                    if (skills.isNotEmpty()) {
+                        HorizontalDivider(
+                            modifier = Modifier.padding(vertical = 2.dp),
+                            color = MaterialTheme.colorScheme.outline.copy(alpha = 0.35f)
+                        )
+                        skills.forEach { skill ->
+                            SkillRow(character, skill, editing, onCycleSkillProf, showAbility = false)
+                        }
+                    }
                 }
             }
         }
@@ -798,10 +899,12 @@ private fun SkillsBoxes(
     onMove: (BoxId, Float, Float) -> Unit,
     onResize: (BoxId, Float?, Float?) -> Unit,
     onZChange: (BoxId, Int) -> Unit,
+    onFontScale: (BoxId, Int) -> Unit,
+    fontScaleFor: (BoxId) -> Float,
     onCommit: () -> Unit
 ) {
     if (character.ruleset == Ruleset.DND_5E_2014) {
-        EditableSheetBox(BoxId.SKILLS_ALL, editing, onMove, onResize, onZChange, onCommit) {
+        EditableSheetBox(BoxId.SKILLS_ALL, editing, onMove, onResize, onZChange, onFontScale, fontScaleFor(BoxId.SKILLS_ALL), onCommit) {
             SheetBox(title = "Skills") {
                 for (skill in Skill.entries) {
                     SkillRow(character, skill, editing, onCycleSkillProf, showAbility = true)
@@ -813,7 +916,7 @@ private fun SkillsBoxes(
         listOf(Ability.STR, Ability.DEX, Ability.INT, Ability.WIS, Ability.CHA).forEach { ab ->
             val skills = byAbility[ab].orEmpty()
             if (skills.isEmpty()) return@forEach
-            EditableSheetBox(skillsBoxId(ab), editing, onMove, onResize, onZChange, onCommit) {
+            EditableSheetBox(skillsBoxId(ab), editing, onMove, onResize, onZChange, onFontScale, fontScaleFor(skillsBoxId(ab)), onCommit) {
                 SheetBox(title = "${ab.abbr} Skills") {
                     skills.forEach { skill ->
                         SkillRow(character, skill, editing, onCycleSkillProf, showAbility = false)
@@ -841,26 +944,120 @@ private fun SkillRow(
     )
 }
 
+/**
+ * Passives box content.
+ *
+ * **View mode**: shows only the skills the user has selected, sorted
+ * alphabetically, rendered as regular [StatRow]s (proficiency dot visible so
+ * the player understands why the number is what it is).
+ *
+ * **Edit mode**: shows every skill. Selected ones appear at the top
+ * (alphabetically), unselected below (also alphabetically) — this gives a
+ * live preview of how the box will look once edit mode is exited. Each row is
+ * tappable to toggle selection; selected rows are full-opacity, unselected rows
+ * are dimmed. The leading circle acts as a visual checkbox.
+ */
 @Composable
-private fun PassivesSection(character: Character) {
-    Column {
-        StatRow(
-            label = "Passive Perception",
-            bonus = PassiveCalculator.perception(character),
-            proficiencyTier = character.proficiencies[Skill.PERCEPTION],
-            isOverridden = character.overrides.passivePerception != null
+private fun PassivesSection(
+    character: Character,
+    editing: Boolean,
+    onToggle: (Skill) -> Unit
+) {
+    val selectedSet = character.passiveSkills.toSet()
+
+    if (editing) {
+        val (sel, unsel) = Skill.entries.partition { it in selectedSet }
+        val sorted = sel.sortedBy { it.display } + unsel.sortedBy { it.display }
+        Column {
+            sorted.forEach { skill ->
+                PassiveToggleRow(
+                    skill       = skill,
+                    passiveScore = PassiveCalculator.passive(character, skill),
+                    isSelected  = skill in selectedSet,
+                    onClick     = { onToggle(skill) }
+                )
+            }
+        }
+    } else {
+        val overrideFor: (Skill) -> Boolean = { skill -> when (skill) {
+            Skill.PERCEPTION    -> character.overrides.passivePerception    != null
+            Skill.INVESTIGATION -> character.overrides.passiveInvestigation != null
+            Skill.INSIGHT       -> character.overrides.passiveInsight       != null
+            else                -> false
+        }}
+        Column {
+            character.passiveSkills
+                .sortedBy { it.display }
+                .forEach { skill ->
+                    StatRow(
+                        label           = "Passive ${skill.display}",
+                        bonus           = PassiveCalculator.passive(character, skill),
+                        proficiencyTier = character.proficiencies[skill],
+                        isOverridden    = overrideFor(skill)
+                    )
+                }
+        }
+    }
+}
+
+/**
+ * Single row in the edit-mode passive picker. The leading circle acts as a
+ * checkbox: filled = will appear on the sheet, outline = hidden in view mode.
+ * Unselected rows are dimmed so the selected ones read as the "real" list.
+ */
+@Composable
+private fun PassiveToggleRow(
+    skill: Skill,
+    passiveScore: Int,
+    isSelected: Boolean,
+    onClick: () -> Unit
+) {
+    val scale      = LocalBoxFontScale.current
+    val slotSize   = (16.dp * scale).coerceAtLeast(10.dp)
+    val dotSize    = (12.dp * scale).coerceAtLeast(8.dp)
+    val vertPad    = (3.dp  * scale).coerceAtLeast(1.dp)
+    val contentAlpha = if (isSelected) 1f else 0.38f
+
+    val primary = MaterialTheme.colorScheme.primary
+    val outline = MaterialTheme.colorScheme.outline
+    val onSurface = MaterialTheme.colorScheme.onSurface
+
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clickable(onClick = onClick)
+            .padding(horizontal = 4.dp, vertical = vertPad),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        // Selection dot — matches ProficiencyDot geometry so columns line up
+        Box(modifier = Modifier.size(slotSize), contentAlignment = Alignment.Center) {
+            Box(
+                modifier = Modifier
+                    .size(dotSize)
+                    .background(
+                        color  = if (isSelected) primary else Color.Transparent,
+                        shape  = CircleShape
+                    )
+                    .border(
+                        width  = 1.dp,
+                        color  = if (isSelected) primary else outline,
+                        shape  = CircleShape
+                    )
+            )
+        }
+        Text(
+            text     = "Passive ${skill.display}",
+            style    = MaterialTheme.typography.bodySmall,
+            color    = onSurface.copy(alpha = contentAlpha),
+            modifier = Modifier
+                .padding(start = 8.dp)
+                .weight(1f)
         )
-        StatRow(
-            label = "Passive Investigation",
-            bonus = PassiveCalculator.investigation(character),
-            proficiencyTier = character.proficiencies[Skill.INVESTIGATION],
-            isOverridden = character.overrides.passiveInvestigation != null
-        )
-        StatRow(
-            label = "Passive Insight",
-            bonus = PassiveCalculator.insight(character),
-            proficiencyTier = character.proficiencies[Skill.INSIGHT],
-            isOverridden = character.overrides.passiveInsight != null
+        Text(
+            text       = passiveScore.toString(),
+            style      = MaterialTheme.typography.bodyMedium,
+            fontWeight = FontWeight.SemiBold,
+            color      = onSurface.copy(alpha = contentAlpha)
         )
     }
 }
@@ -947,30 +1144,46 @@ private fun HitDieRow(
     onSpend: () -> Unit,
     onRestore: () -> Unit
 ) {
+    val scale = LocalBoxFontScale.current
+    val buttonSize  = (32.dp * scale).coerceAtLeast(20.dp)
+    val iconSize    = (16.dp * scale).coerceAtLeast(10.dp)
+    val valueWidth  = (52.dp * scale).coerceAtLeast(32.dp)
+    val verticalPad = (2.dp  * scale).coerceAtLeast(1.dp)
+
     Row(
         modifier = Modifier
             .fillMaxWidth()
-            .padding(vertical = 4.dp),
+            .padding(vertical = verticalPad),
         verticalAlignment = Alignment.CenterVertically
     ) {
-        IconButton(onClick = onSpend, enabled = available > 0) {
-            Icon(Icons.Default.Remove, contentDescription = "Spend a d$dieSize")
+        IconButton(
+            onClick = onSpend,
+            enabled = available > 0,
+            modifier = Modifier.size(buttonSize)
+        ) {
+            Icon(Icons.Default.Remove, contentDescription = "Spend a d$dieSize",
+                modifier = Modifier.size(iconSize))
         }
         Text(
             text = "$available / $max",
-            style = MaterialTheme.typography.titleMedium,
+            style = MaterialTheme.typography.bodyMedium,
             fontWeight = FontWeight.SemiBold,
-            modifier = Modifier.width(64.dp),
+            modifier = Modifier.width(valueWidth),
             textAlign = androidx.compose.ui.text.style.TextAlign.Center
         )
         Text(
             text = "d$dieSize",
-            style = MaterialTheme.typography.bodyLarge,
+            style = MaterialTheme.typography.bodyMedium,
             modifier = Modifier.weight(1f),
             color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.7f)
         )
-        IconButton(onClick = onRestore, enabled = available < max) {
-            Icon(Icons.Default.Add, contentDescription = "Restore a d$dieSize")
+        IconButton(
+            onClick = onRestore,
+            enabled = available < max,
+            modifier = Modifier.size(buttonSize)
+        ) {
+            Icon(Icons.Default.Add, contentDescription = "Restore a d$dieSize",
+                modifier = Modifier.size(iconSize))
         }
     }
 }
@@ -1051,6 +1264,101 @@ private fun Character.adjustHitDie(dieSize: Int, delta: Int): Character {
     val updated = (current + delta).coerceIn(0, maxForDie)
     if (updated == current) return this
     return copy(hitDiceRemaining = hitDiceRemaining + (dieSize to updated))
+}
+
+/**
+ * Edit-mode section for managing the PDF background. Shows the import button
+ * and, when a PDF is already set, a "Clear" affordance. Sits above the canvas
+ * in the same column as IdentityEditorSection and ClassEditorSection, so it
+ * is never part of the draggable layout.
+ */
+@Composable
+private fun PdfSection(
+    pdfPath: String?,
+    onImportClick: () -> Unit,
+    onClearClick: () -> Unit
+) {
+    Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+        SectionHeader("PDF Background")
+        if (pdfPath != null) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.SpaceBetween
+            ) {
+                Text(
+                    text = "PDF imported",
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.7f)
+                )
+                TextButton(onClick = onClearClick) {
+                    Text("Clear", color = MaterialTheme.colorScheme.error)
+                }
+            }
+        }
+        OutlinedButton(
+            onClick = onImportClick,
+            modifier = Modifier.fillMaxWidth()
+        ) {
+            Text(if (pdfPath != null) "Replace PDF" else "Import PDF")
+        }
+    }
+}
+
+/**
+ * Renders all pages of the PDF at [pdfPath] stacked vertically, each scaled
+ * to fill the full screen width. Pages are rendered on [Dispatchers.IO] the
+ * first time (and whenever [pdfPath] changes) and then displayed as bitmaps.
+ *
+ * Keeping the render result in [produceState] means Compose reuses the
+ * bitmaps across recompositions — we only re-render when the path changes.
+ */
+@Composable
+private fun PdfBackground(pdfPath: String, modifier: Modifier = Modifier) {
+    val context = LocalContext.current
+    val pages by produceState<List<Bitmap>>(initialValue = emptyList(), key1 = pdfPath) {
+        value = withContext(Dispatchers.IO) { renderPdfPages(context, pdfPath) }
+    }
+    Column(modifier = modifier) {
+        pages.forEach { bitmap ->
+            Image(
+                bitmap = bitmap.asImageBitmap(),
+                contentDescription = null,
+                modifier = Modifier.fillMaxWidth(),
+                contentScale = ContentScale.FillWidth
+            )
+        }
+    }
+}
+
+/**
+ * Renders every page of the PDF file at [pdfPath] into [Bitmap]s sized to
+ * the device's screen width. Must be called from a background thread.
+ * Returns an empty list if the file doesn't exist.
+ */
+private fun renderPdfPages(context: Context, pdfPath: String): List<Bitmap> {
+    val file = File(pdfPath)
+    if (!file.exists()) return emptyList()
+    val screenWidth = context.resources.displayMetrics.widthPixels
+    val fd = ParcelFileDescriptor.open(file, ParcelFileDescriptor.MODE_READ_ONLY)
+    val renderer = PdfRenderer(fd)
+    val bitmaps = mutableListOf<Bitmap>()
+    try {
+        repeat(renderer.pageCount) { i ->
+            val page = renderer.openPage(i)
+            val scale = screenWidth.toFloat() / page.width
+            val h = (page.height * scale).toInt()
+            val bmp = Bitmap.createBitmap(screenWidth, h, Bitmap.Config.ARGB_8888)
+            bmp.eraseColor(android.graphics.Color.WHITE)
+            page.render(bmp, null, null, PdfRenderer.Page.RENDER_MODE_FOR_DISPLAY)
+            page.close()
+            bitmaps += bmp
+        }
+    } finally {
+        renderer.close()
+        fd.close()
+    }
+    return bitmaps
 }
 
 @Composable

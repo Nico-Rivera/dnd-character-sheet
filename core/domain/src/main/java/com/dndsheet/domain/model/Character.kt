@@ -2,6 +2,7 @@ package com.dndsheet.domain.model
 
 import com.dndsheet.domain.enums.Alignment
 import com.dndsheet.domain.enums.Ruleset
+import com.dndsheet.domain.enums.Skill
 import kotlinx.serialization.Serializable
 import java.util.UUID
 
@@ -42,6 +43,25 @@ data class Character(
     val notes: String = "",
 
     val overrides: ManualOverrides = ManualOverrides(),
+
+    /**
+     * Skills the user has chosen to display in the Passives box. Persisted so
+     * each character can show only the passives relevant to their build.
+     * Defaults to the classic three that every table references most often.
+     */
+    val passiveSkills: List<Skill> = listOf(Skill.PERCEPTION, Skill.INVESTIGATION, Skill.INSIGHT),
+
+    /** Per-character sheet box arrangement. Empty = default layout. */
+    val layout: SheetLayout = SheetLayout(),
+
+    /**
+     * Absolute path inside the app's internal storage to a PDF used as the
+     * sheet background. Null = no PDF (default blank canvas).
+     *
+     * Future: a companion pdfLayout field will carry CV-detected field
+     * positions so boxes can be auto-aligned to the PDF's structure.
+     */
+    val pdfPath: String? = null,
 
     /** Monotonically increasing — bumped by the data layer on every save. */
     val revision: Long = 0,

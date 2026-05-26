@@ -10,6 +10,18 @@ import com.dndsheet.domain.model.Character
  */
 object PassiveCalculator {
 
+    /**
+     * Generic passive score for any skill: 10 + the skill's full bonus.
+     * Delegates to the three named methods for Perception, Investigation and
+     * Insight so their manual-override support is preserved.
+     */
+    fun passive(character: Character, skill: Skill): Int = when (skill) {
+        Skill.PERCEPTION    -> perception(character)
+        Skill.INVESTIGATION -> investigation(character)
+        Skill.INSIGHT       -> insight(character)
+        else                -> 10 + SkillCalculator.bonus(character, skill)
+    }
+
     fun perception(character: Character): Int =
         character.overrides.passivePerception
             ?: (10 + SkillCalculator.bonus(character, Skill.PERCEPTION))

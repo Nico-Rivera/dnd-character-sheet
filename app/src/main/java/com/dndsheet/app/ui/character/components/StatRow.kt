@@ -18,6 +18,7 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import com.dndsheet.app.ui.character.formatModifier
+import com.dndsheet.app.ui.character.layout.LocalBoxFontScale
 import com.dndsheet.domain.enums.ProficiencyLevel
 
 /**
@@ -28,6 +29,10 @@ import com.dndsheet.domain.enums.ProficiencyLevel
  *   HALF       → half-filled
  *   PROFICIENT → filled
  *   EXPERTISE  → filled with a thick secondary-color ring
+ *
+ * The dot size and row vertical padding both scale with [LocalBoxFontScale]
+ * so that reducing the font size via the per-box +/− controls also tightens
+ * the spacing and shrinks the non-text markers proportionally.
  */
 @Composable
 fun StatRow(
@@ -38,25 +43,28 @@ fun StatRow(
     modifier: Modifier = Modifier,
     onClick: (() -> Unit)? = null
 ) {
+    val scale = LocalBoxFontScale.current
+    val verticalPad = (3.dp * scale).coerceAtLeast(1.dp)
+
     val clickModifier = if (onClick != null) Modifier.clickable(onClick = onClick) else Modifier
     Row(
         modifier = modifier
             .fillMaxWidth()
             .then(clickModifier)
-            .padding(horizontal = 16.dp, vertical = 6.dp),
+            .padding(horizontal = 4.dp, vertical = verticalPad),
         verticalAlignment = Alignment.CenterVertically
     ) {
-        ProficiencyDot(proficiencyTier)
+        ProficiencyDot(proficiencyTier, scale)
         Text(
             text = label,
-            style = MaterialTheme.typography.bodyMedium,
+            style = MaterialTheme.typography.bodySmall,
             modifier = Modifier
-                .padding(start = 12.dp)
+                .padding(start = 8.dp)
                 .weight(1f)
         )
         Text(
             text = formatModifier(bonus),
-            style = MaterialTheme.typography.bodyLarge,
+            style = MaterialTheme.typography.bodyMedium,
             fontWeight = FontWeight.SemiBold
         )
         PinnedIndicator(
@@ -67,27 +75,30 @@ fun StatRow(
 }
 
 @Composable
-private fun ProficiencyDot(tier: ProficiencyLevel) {
-    val primary = MaterialTheme.colorScheme.primary
-    val outline = MaterialTheme.colorScheme.outline
+private fun ProficiencyDot(tier: ProficiencyLevel, scale: Float) {
+    val primary   = MaterialTheme.colorScheme.primary
+    val outline   = MaterialTheme.colorScheme.outline
     val secondary = MaterialTheme.colorScheme.secondary
 
-    // Per-tier visual: (size, fill, ring color, ring width).
+    // Per-tier visual: (fill, ring color, base ring width).
     // EXPERTISE is rendered larger with a thicker contrasting ring so it
-    // reads as "more than proficient" at a glance — at the same size the
-    // ring would just look like noise.
-    val size = if (tier == ProficiencyLevel.EXPERTISE) 16.dp else 12.dp
-    val (fill, ringColor, ringWidth) = when (tier) {
+    // reads as "more than proficient" at a glance.
+    val baseSize = if (tier == ProficiencyLevel.EXPERTISE) 16.dp else 12.dp
+    val size = baseSize * scale
+
+    val (fill, ringColor, baseRingWidth) = when (tier) {
         ProficiencyLevel.NONE       -> Triple(Color.Transparent, outline, 1.dp)
         ProficiencyLevel.HALF       -> Triple(primary.copy(alpha = 0.45f), outline, 1.dp)
         ProficiencyLevel.PROFICIENT -> Triple(primary, primary, 0.dp)
         ProficiencyLevel.EXPERTISE  -> Triple(primary, secondary, 3.dp)
     }
+    val ringWidth = baseRingWidth * scale
 
-    // Reserve a fixed 16.dp slot regardless of dot size so labels in
+    // Reserve a fixed slot (scaled) regardless of dot size so labels in
     // different rows still line up vertically.
+    val slotSize = 16.dp * scale
     Box(
-        modifier = Modifier.size(16.dp),
+        modifier = Modifier.size(slotSize),
         contentAlignment = Alignment.Center
     ) {
         Box(

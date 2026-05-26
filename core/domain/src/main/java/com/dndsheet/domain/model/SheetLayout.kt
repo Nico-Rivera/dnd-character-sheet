@@ -24,7 +24,9 @@ data class BoxPosition(
     val y: Float = 0f,
     val width: Float = 0f,
     val height: Float = 0f,
-    val z: Int = 0
+    val z: Int = 0,
+    /** Per-box font scale. 1.0 = default, 0.5–2.0 range, steps of 0.1. */
+    val fontScale: Float = 1f
 )
 
 /**

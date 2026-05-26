@@ -13,17 +13,23 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.KeyboardArrowDown
 import androidx.compose.material.icons.filled.KeyboardArrowUp
+import androidx.compose.material.icons.filled.Remove
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.Typography
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.CompositionLocalProvider
+import androidx.compose.runtime.compositionLocalOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.Layout
@@ -89,20 +95,47 @@ fun defaultRows(ruleset: Ruleset): List<List<BoxId>> = buildList {
     } else {
         add(listOf(BoxId.SAVE_STR, BoxId.SAVE_DEX, BoxId.SAVE_CON))
         add(listOf(BoxId.SAVE_INT, BoxId.SAVE_WIS, BoxId.SAVE_CHA))
-        add(listOf(BoxId.SKILLS_STR))
-        add(listOf(BoxId.SKILLS_DEX))
-        add(listOf(BoxId.SKILLS_INT))
-        add(listOf(BoxId.SKILLS_WIS))
-        add(listOf(BoxId.SKILLS_CHA))
+        // In 2024 mode skills are rendered inside the SAVE_* boxes —
+        // no separate SKILLS_* rows in the default flow.
     }
     add(listOf(BoxId.PASSIVES))
     add(listOf(BoxId.CONDITIONS))
 }
 
 /**
+ * Carries the per-box font-scale factor set by [EditableSheetBox] to any
+ * descendant composable that needs to size non-text elements (dots, padding,
+ * icon sizes) proportionally. Defaults to 1f when read outside a box.
+ */
+val LocalBoxFontScale = compositionLocalOf { 1f }
+
+/**
+ * Scales all 15 Material3 text styles by [factor] so content wrapped in
+ * `MaterialTheme(typography = baseTypography.scaled(factor))` gets a uniform
+ * font-size bump/shrink without touching individual composables.
+ */
+private fun Typography.scaled(factor: Float): Typography = Typography(
+    displayLarge   = displayLarge.copy(fontSize   = displayLarge.fontSize   * factor),
+    displayMedium  = displayMedium.copy(fontSize  = displayMedium.fontSize  * factor),
+    displaySmall   = displaySmall.copy(fontSize   = displaySmall.fontSize   * factor),
+    headlineLarge  = headlineLarge.copy(fontSize  = headlineLarge.fontSize  * factor),
+    headlineMedium = headlineMedium.copy(fontSize = headlineMedium.fontSize * factor),
+    headlineSmall  = headlineSmall.copy(fontSize  = headlineSmall.fontSize  * factor),
+    titleLarge  = titleLarge.copy(fontSize  = titleLarge.fontSize  * factor),
+    titleMedium = titleMedium.copy(fontSize = titleMedium.fontSize * factor),
+    titleSmall  = titleSmall.copy(fontSize  = titleSmall.fontSize  * factor),
+    bodyLarge  = bodyLarge.copy(fontSize  = bodyLarge.fontSize  * factor),
+    bodyMedium = bodyMedium.copy(fontSize = bodyMedium.fontSize * factor),
+    bodySmall  = bodySmall.copy(fontSize  = bodySmall.fontSize  * factor),
+    labelLarge  = labelLarge.copy(fontSize  = labelLarge.fontSize  * factor),
+    labelMedium = labelMedium.copy(fontSize = labelMedium.fontSize * factor),
+    labelSmall  = labelSmall.copy(fontSize  = labelSmall.fontSize  * factor)
+)
+
+/**
  * Wraps a sheet-box composable, tagging it with [boxId] for [SheetCanvas] to
- * find, and — in edit mode — enabling drag-to-move, edge/corner resize, and
- * z-order step buttons.
+ * find, and — in edit mode — enabling drag-to-move, edge/corner resize, z-order
+ * step buttons, and per-box font-size +/− controls.
  *
  * **Gesture architecture**: a *single* [pointerInput] on the root [Box]
  * handles all drag interactions. On [onDragStart] it classifies the initial
@@ -120,9 +153,15 @@ fun defaultRows(ruleset: Ruleset): List<List<BoxId>> = buildList {
  * value." Right-edge drag passes `(newWidth, null)` so height stays auto;
  * bottom-edge passes `(null, newHeight)`; corner passes both non-null.
  *
- * **Z-order buttons**: small ▲/▼ buttons rendered at the top-end corner.
- * Clicks don't conflict with the drag detector (no slop threshold is reached
- * by a tap, so [detectDragGestures] stays idle for taps).
+ * **Z-order buttons**: small ▲/▼ buttons at the top-end corner. Taps don't
+ * conflict with the drag detector (no slop threshold is reached by a tap, so
+ * [detectDragGestures] stays idle for taps).
+ *
+ * **Font-scale buttons**: small +/− buttons at the top-start corner, visible
+ * only in edit mode. Each tap calls [onFontScale] with ±1; the caller applies
+ * the actual 0.1-step and coerces the range. All box content is wrapped in
+ * `MaterialTheme(typography = scaled)` so font size changes propagate
+ * uniformly without touching individual composables.
  */
 @Composable
 fun EditableSheetBox(
@@ -131,6 +170,8 @@ fun EditableSheetBox(
     onMove: (BoxId, xDp: Float, yDp: Float) -> Unit,
     onResize: (BoxId, widthDp: Float?, heightDp: Float?) -> Unit,
     onZChange: (BoxId, delta: Int) -> Unit,
+    onFontScale: (BoxId, Int) -> Unit,
+    fontScale: Float = 1f,
     onCommit: () -> Unit,
     content: @Composable () -> Unit
 ) {
@@ -212,35 +253,60 @@ fun EditableSheetBox(
                 )
             }
     ) {
-        // When SheetCanvas gives this Box a fixed height (stored resize value),
-        // Box propagates minHeight=0 to children, so the inner composable wraps
-        // at its natural height instead of filling the box. This Layout re-applies
-        // the tight lower bound so the content stretches to fill the stored height.
-        // When height is auto (maxHeight = Infinity, hasBoundedHeight = false),
-        // minHeight stays 0 and the content wraps exactly as before.
-        Layout(content = { content() }) { measurables, constraints ->
-            val fillH = if (constraints.hasBoundedHeight) constraints.maxHeight else 0
-            val placeables = measurables.map {
-                it.measure(constraints.copy(minHeight = fillH))
+        // Scale all text inside the box by the stored fontScale factor.
+        // LocalBoxFontScale also makes the scale available to composables that
+        // size non-text elements (proficiency dots, row padding) proportionally.
+        // remember(fontScale) avoids rebuilding the Typography object every frame.
+        val baseTypography = MaterialTheme.typography
+        val scaledTypography = remember(fontScale) { baseTypography.scaled(fontScale) }
+        CompositionLocalProvider(LocalBoxFontScale provides fontScale) {
+        MaterialTheme(typography = scaledTypography) {
+            // When SheetCanvas gives this Box a fixed height (stored resize value),
+            // Box propagates minHeight=0 to children, so the inner composable wraps
+            // at its natural height instead of filling the box. This Layout re-applies
+            // the tight lower bound so the content stretches to fill the stored height.
+            // When height is auto (maxHeight = Infinity, hasBoundedHeight = false),
+            // minHeight stays 0 and the content wraps exactly as before.
+            Layout(content = { content() }) { measurables, constraints ->
+                val fillH = if (constraints.hasBoundedHeight) constraints.maxHeight else 0
+                val placeables = measurables.map {
+                    it.measure(constraints.copy(minHeight = fillH))
+                }
+                val h = placeables.maxOfOrNull { it.height } ?: 0
+                layout(constraints.maxWidth, h) {
+                    placeables.forEach { it.place(0, 0) }
+                }
             }
-            val h = placeables.maxOfOrNull { it.height } ?: 0
-            layout(constraints.maxWidth, h) {
-                placeables.forEach { it.place(0, 0) }
-            }
-        }
+        } // end MaterialTheme
+        } // end CompositionLocalProvider
 
         if (editing) {
+            val zColor  = MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.9f)
+            val zTint   = MaterialTheme.colorScheme.onPrimaryContainer
+            val fsColor = MaterialTheme.colorScheme.secondaryContainer.copy(alpha = 0.9f)
+            val fsTint  = MaterialTheme.colorScheme.onSecondaryContainer
             val handleColor = MaterialTheme.colorScheme.primary.copy(alpha = 0.55f)
 
-            // Z-order step buttons — top-end corner, small and unobtrusive
+            // Font-scale +/− buttons — top-start corner
+            Column(
+                modifier = Modifier
+                    .align(Alignment.TopStart)
+                    .padding(2.dp),
+                verticalArrangement = Arrangement.spacedBy(2.dp)
+            ) {
+                EditButton(Icons.Default.Add,    fsColor, fsTint) { onFontScale(boxId, +1) }
+                EditButton(Icons.Default.Remove, fsColor, fsTint) { onFontScale(boxId, -1) }
+            }
+
+            // Z-order step buttons — top-end corner
             Column(
                 modifier = Modifier
                     .align(Alignment.TopEnd)
                     .padding(2.dp),
                 verticalArrangement = Arrangement.spacedBy(2.dp)
             ) {
-                ZButton(Icons.Default.KeyboardArrowUp)   { onZChange(boxId, +1) }
-                ZButton(Icons.Default.KeyboardArrowDown) { onZChange(boxId, -1) }
+                EditButton(Icons.Default.KeyboardArrowUp,   zColor, zTint) { onZChange(boxId, +1) }
+                EditButton(Icons.Default.KeyboardArrowDown, zColor, zTint) { onZChange(boxId, -1) }
             }
 
             // Right-edge handle (visual cue for width resize zone)
@@ -272,13 +338,19 @@ fun EditableSheetBox(
     }
 }
 
+/** Small 20×20dp circular button used for both z-order and font-scale controls. */
 @Composable
-private fun ZButton(icon: ImageVector, onClick: () -> Unit) {
+private fun EditButton(
+    icon: ImageVector,
+    containerColor: Color,
+    contentColor: Color,
+    onClick: () -> Unit
+) {
     Box(
         modifier = Modifier
             .size(20.dp)
             .clip(CircleShape)
-            .background(MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.9f))
+            .background(containerColor)
             .clickable(onClick = onClick),
         contentAlignment = Alignment.Center
     ) {
@@ -286,7 +358,7 @@ private fun ZButton(icon: ImageVector, onClick: () -> Unit) {
             imageVector = icon,
             contentDescription = null,
             modifier = Modifier.size(14.dp),
-            tint = MaterialTheme.colorScheme.onPrimaryContainer
+            tint = contentColor
         )
     }
 }
