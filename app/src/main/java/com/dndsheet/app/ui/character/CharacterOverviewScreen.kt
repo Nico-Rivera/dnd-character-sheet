@@ -100,6 +100,15 @@ import com.dndsheet.rules.PassiveCalculator
 import com.dndsheet.rules.ProficiencyCalculator
 import com.dndsheet.rules.SavingThrowCalculator
 import com.dndsheet.rules.SkillCalculator
+import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.material.icons.filled.Draw
+import androidx.compose.runtime.mutableStateListOf
+import com.dndsheet.app.ui.character.layout.DEFAULT_INK_COLOR
+import com.dndsheet.app.ui.character.layout.DEFAULT_INK_WIDTH
+import com.dndsheet.app.ui.character.layout.InkCanvas
+import com.dndsheet.app.ui.character.layout.InkTool
+import com.dndsheet.app.ui.character.layout.InkToolbar
+import com.dndsheet.domain.model.Stroke
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -113,14 +122,21 @@ fun CharacterOverviewScreen(
     // Edit mode and the currently-open dialog are screen-local state — they
     // don't survive process death, which is fine for transient edit UI.
     var editing by remember { mutableStateOf(false) }
+    var inkMode by remember { mutableStateOf(false) }
     var activeDialog by remember { mutableStateOf<ActiveDialog>(ActiveDialog.None) }
 
     Scaffold(
         topBar = {
             TopAppBar(
-                colors = if (editing) TopAppBarDefaults.topAppBarColors(
-                    containerColor = MaterialTheme.colorScheme.primaryContainer
-                ) else TopAppBarDefaults.topAppBarColors(),
+                colors = when {
+                    editing -> TopAppBarDefaults.topAppBarColors(
+                        containerColor = MaterialTheme.colorScheme.primaryContainer
+                    )
+                    inkMode -> TopAppBarDefaults.topAppBarColors(
+                        containerColor = MaterialTheme.colorScheme.tertiaryContainer
+                    )
+                    else    -> TopAppBarDefaults.topAppBarColors()
+                },
                 title = {
                     Text(
                         when (val s = state) {
@@ -135,9 +151,21 @@ fun CharacterOverviewScreen(
                     }
                 },
                 actions = {
-                    IconButton(onClick = { editing = !editing; activeDialog = ActiveDialog.None }) {
+                    // Ink mode — disabled while edit mode is active.
+                    IconButton(
+                        onClick  = { inkMode = !inkMode; if (inkMode) { editing = false; activeDialog = ActiveDialog.None } },
+                        enabled  = !editing
+                    ) {
+                        if (inkMode) Icon(Icons.Default.Check, contentDescription = "Done inking")
+                        else         Icon(Icons.Default.Draw,  contentDescription = "Ink mode")
+                    }
+                    // Edit mode — disabled while ink mode is active.
+                    IconButton(
+                        onClick  = { editing = !editing; activeDialog = ActiveDialog.None; if (editing) inkMode = false },
+                        enabled  = !inkMode
+                    ) {
                         if (editing) Icon(Icons.Default.Check, contentDescription = "Done editing")
-                        else Icon(Icons.Default.Edit, contentDescription = "Edit")
+                        else         Icon(Icons.Default.Edit,  contentDescription = "Edit")
                     }
                 }
             )
@@ -154,6 +182,7 @@ fun CharacterOverviewScreen(
                 is OverviewState.Loaded -> SheetBody(
                     character = s.character,
                     editing = editing,
+                    inkMode = inkMode,
                     onOpenDialog = { activeDialog = it },
                     onCycleSkillProf = { skill ->
                         viewModel.update { it.cycleSkillProf(skill) }
@@ -191,6 +220,9 @@ fun CharacterOverviewScreen(
                                           else c.passiveSkills + skill
                             c.copy(passiveSkills = updated)
                         }
+                    },
+                    onSaveStrokes = { strokes ->
+                        viewModel.update { it.copy(inkStrokes = strokes) }
                     }
                 )
             }
@@ -310,6 +342,7 @@ private fun CenteredText(text: String) {
 private fun SheetBody(
     character: Character,
     editing: Boolean,
+    inkMode: Boolean,
     onOpenDialog: (ActiveDialog) -> Unit,
     onCycleSkillProf: (Skill) -> Unit,
     onCycleSaveProf: (Ability) -> Unit,
@@ -321,7 +354,8 @@ private fun SheetBody(
     onPersistLayout: (Map<String, BoxPosition>) -> Unit,
     onImportPdf: (pdfPath: String) -> Unit,
     onClearPdf: () -> Unit,
-    onTogglePassive: (Skill) -> Unit
+    onTogglePassive: (Skill) -> Unit,
+    onSaveStrokes: (List<Stroke>) -> Unit
 ) {
     val context = LocalContext.current
     val scope   = rememberCoroutineScope()
@@ -400,13 +434,65 @@ private fun SheetBody(
         onCommit()
     }
 
-    Column(
-        modifier = Modifier
-            .fillMaxSize()
-            .verticalScroll(rememberScrollState())
-            .padding(horizontal = 16.dp, vertical = 12.dp),
-        verticalArrangement = Arrangement.spacedBy(12.dp)
-    ) {
+    // ── Ink layer state ───────────────────────────────────────────────────────
+    var workingStrokes by remember(character.id) { mutableStateOf(character.inkStrokes) }
+    androidx.compose.runtime.LaunchedEffect(character.inkStrokes) {
+        workingStrokes = character.inkStrokes
+    }
+    var activeTool by remember { mutableStateOf(InkTool.PEN) }
+    var penColor   by remember { mutableStateOf(DEFAULT_INK_COLOR) }
+    var penWidth   by remember { mutableStateOf(DEFAULT_INK_WIDTH) }
+
+    // SnapshotStateList so the toolbar can observe .size for undo/redo enabled state.
+    val undoStack = remember { mutableStateListOf<List<Stroke>>() }
+    val redoStack = remember { mutableStateListOf<List<Stroke>>() }
+
+    val onStrokeComplete: (Stroke) -> Unit = { stroke ->
+        undoStack.add(workingStrokes)
+        if (undoStack.size > 50) undoStack.removeAt(0)
+        redoStack.clear()
+        workingStrokes = workingStrokes + stroke
+        onSaveStrokes(workingStrokes)
+    }
+    val onUndo: () -> Unit = {
+        if (undoStack.isNotEmpty()) {
+            redoStack.add(workingStrokes)
+            workingStrokes = undoStack.removeLast()
+            onSaveStrokes(workingStrokes)
+        }
+    }
+    val onRedo: () -> Unit = {
+        if (redoStack.isNotEmpty()) {
+            undoStack.add(workingStrokes)
+            workingStrokes = redoStack.removeLast()
+            onSaveStrokes(workingStrokes)
+        }
+    }
+
+    Column(modifier = Modifier.fillMaxSize()) {
+        // InkToolbar is fixed above the scrollable content — it stays pinned
+        // while the sheet scrolls beneath it.
+        AnimatedVisibility(visible = inkMode) {
+            InkToolbar(
+                activeTool    = activeTool,
+                onToolChange  = { activeTool = it },
+                penColor      = penColor,
+                onColorChange = { penColor = it },
+                penWidth      = penWidth,
+                onWidthChange = { penWidth = it },
+                canUndo       = undoStack.isNotEmpty(),
+                canRedo       = redoStack.isNotEmpty(),
+                onUndo        = onUndo,
+                onRedo        = onRedo
+            )
+        }
+        Column(
+            modifier = Modifier
+                .weight(1f)
+                .verticalScroll(rememberScrollState())
+                .padding(horizontal = 16.dp, vertical = 12.dp),
+            verticalArrangement = Arrangement.spacedBy(12.dp)
+        ) {
         // Identity and class editors are editing tools, not sheet boxes, so
         // they live above the canvas and aren't part of the draggable layout.
         // Crucially, keeping them out of the canvas means the canvas geometry
@@ -513,8 +599,20 @@ private fun SheetBody(
                 }
             }
         }
+            // Ink canvas overlays the entire sheet area. matchParentSize() lets
+            // SheetCanvas determine the Box height while InkCanvas fills it exactly.
+            InkCanvas(
+                strokes          = workingStrokes,
+                inkMode          = inkMode,
+                activeTool       = activeTool,
+                penColor         = penColor,
+                penWidthDp       = penWidth,
+                onStrokeComplete = onStrokeComplete,
+                modifier         = Modifier.matchParentSize()
+            )
         } // end PDF+canvas Box
-    }
+        } // end scrollable Column
+    } // end outer Column
 }
 
 private fun abilityBoxId(a: Ability): BoxId = when (a) {
