@@ -55,6 +55,13 @@ data class Character(
     val layout: SheetLayout = SheetLayout(),
 
     /**
+     * All committed ink strokes on this character's sheet, in draw order
+     * (index 0 drawn first, highest index on top). Persisted in the JSON
+     * blob alongside the layout — no Room migration required.
+     */
+    val inkStrokes: List<Stroke> = emptyList(),
+
+    /**
      * Absolute path inside the app's internal storage to a PDF used as the
      * sheet background. Null = no PDF (default blank canvas).
      *
