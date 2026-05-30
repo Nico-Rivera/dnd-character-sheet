@@ -923,4 +923,47 @@ private fun segmentsIntersect(a: Offset, b: Offset, c: Offset, d: Offset): Boole
     return ((d1>0&&d2<0)||(d1<0&&d2>0)) && ((d3>0&&d4<0)||(d3<0&&d4>0))
 }
 
-private fun eraseAt(strokes: List<Stroke>, erased: MutableList<String>, x: Float, y: Float, radiu
+private fun eraseAt(strokes: List<Stroke>, erased: MutableList<String>, x: Float, y: Float, radiusPx: Float) {
+    for (stroke in strokes) {
+        if (stroke.id in erased) continue
+        if (hitsStroke(stroke, x, y, radiusPx)) erased.add(stroke.id)
+    }
+}
+
+private fun hitsStroke(stroke: Stroke, x: Float, y: Float, radiusPx: Float): Boolean {
+    val pts = stroke.points; if (pts.isEmpty()) return false
+    val r2 = radiusPx * radiusPx
+    if (pts.size == 1) { val dx = pts[0].x-x; val dy = pts[0].y-y; return dx*dx+dy*dy <= r2 }
+    for (i in 0 until pts.size-1) { if (segmentDistSq(pts[i], pts[i+1], x, y) <= r2) return true }
+    return false
+}
+
+private fun segmentDistSq(a: StrokePoint, b: StrokePoint, px: Float, py: Float): Float {
+    val dx = b.x-a.x; val dy = b.y-a.y; val lenSq = dx*dx+dy*dy
+    if (lenSq == 0f) { val ex = px-a.x; val ey = py-a.y; return ex*ex+ey*ey }
+    val t = (((px-a.x)*dx+(py-a.y)*dy)/lenSq).coerceIn(0f,1f)
+    val ex = px-(a.x+t*dx); val ey = py-(a.y+t*dy); return ex*ex+ey*ey
+}
+
+/**
+ * Snaps [end] to the nearest cardinal axis (horizontal or vertical) relative to [start]
+ * if the angle is within 2.5 degrees of that axis; otherwise returns [end] unchanged.
+ */
+private fun snapToAxis(start: Offset, end: Offset): Offset {
+    val dx = end.x - start.x
+    val dy = end.y - start.y
+    val angleDeg = Math.toDegrees(atan2(dy, dx).toDouble()).toFloat()
+    val absAngle = abs(angleDeg)
+
+    // Distance to nearest horizontal (0° / 180°) and vertical (90°) axis.
+    val toHorizontal = minOf(absAngle, abs(180f - absAngle))
+    val toVertical   = abs(90f - absAngle)
+
+    val tolerance = 2.5f
+    return when {
+        toHorizontal <= tolerance -> Offset(end.x, start.y)  // lock to horizontal
+        toVertical   <= tolerance -> Offset(start.x, end.y)  // lock to vertical
+        else                     -> end
+    }
+}
+

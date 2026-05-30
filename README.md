@@ -6,6 +6,33 @@ annotation over the sheet.
 
 ## Current state
 
+**Commit 8 — per-box font scale + configurable passives.** Each sheet
+box gains +/− buttons (opposite side from z-order controls) that adjust
+its font size in 0.1 steps, clamped to 0.5×–2.0×. Scale is persisted in
+`BoxPosition.fontScale` and propagated to all non-text elements (proficiency
+dots, row padding, hit-dice button sizes) via a `LocalBoxFontScale`
+`CompositionLocal` — so shrinking a crowded box tightens everything
+proportionally, not just the text. The passives box is now configurable:
+in edit mode all 18 skills appear with toggle circles; selected skills
+float to the top (alphabetical within each group) so the box gives a
+live size preview. In view mode only the selected skills are shown,
+rendered via the generic `PassiveCalculator.passive()` path (manual
+overrides for the classic three are still respected).
+
+**Commit 7 — draggable, resizable, z-ordered sheet boxes.** The static
+grid is gone. Each box is now a free-floating `EditableSheetBox` that
+can be dragged anywhere on a scrollable canvas (with a 4 dp snap grid),
+resized via a bottom-right corner handle, and reordered with ▲/▼ z-order
+buttons. Layout (position, size, z-index, font scale) is persisted
+in `SheetLayout` / `BoxPosition` inside the `Character` JSON — no Room
+migration required. Tapping outside edit mode snaps the layout commit.
+
+**Commit 6 — manual override editing.** Long-press any calculated value
+to pin it to a custom number. A pinned value shows the pin dot; long-press
+again to unpin and restore the engine's calculation. Overrides are stored
+in `ManualOverrides` (already in the data model since commit 1) and
+respected by every calculator.
+
 **Commit 5 — boxify + hit dice + ruleset-aware layout.** Every grouped
 statistic now lives in its own `SheetBox` (bordered rounded container).
 Skills and saves branch on the character's ruleset: 5e keeps everything
@@ -13,8 +40,6 @@ in single boxes; 2024 puts each save in its own box (3×2 grid under the
 ability scores) and splits skills by governing ability into one box per
 ability. Hit dice get their own box with per-die-type spend/restore
 controls and a Reset affordance that appears only when dice are spent.
-The boxified layout sets up commit 6, where each box will become a
-draggable, repositionable unit.
 
 **Commit 4 — core-sheet editing.** A pencil icon in the top app bar
 toggles edit mode. In edit mode the title bar tints, header fields
@@ -143,9 +168,10 @@ Output lands in `app/build/outputs/apk/debug/`.
 - **Spell slots** — full multiclass table from PHB p. 165, with FULL/HALF/
   THIRD/PACT progressions. Warlock pact slots tracked on a separate table
   and never combine with the multiclass slots.
-- **Passive scores** — perception, investigation, insight all use
-  `10 + skill bonus`. Initiative is DEX modifier (feature modifiers will
-  layer on in a later commit).
+- **Passive scores** — generic `passive(character, skill)` computes
+  `10 + skill bonus` for any of the 18 skills. Perception, Investigation,
+  and Insight additionally respect their `ManualOverrides` fields. Initiative
+  is DEX modifier (feature modifiers will layer on in a later commit).
 
 All calculators check `ManualOverrides` first, so the user's pinned value
 always wins per spec §8.
@@ -220,18 +246,69 @@ always wins per spec §8.
   calculator. Cycling back to NONE removes the entry from the
   proficiency map rather than storing `NONE` explicitly.
 
-## What's NOT in this commit
+## What's in commit 6 (manual overrides UI)
 
-- **Weapon / spell / inventory editing** — separate page(s) in a later
-  commit; the overview doesn't try to be every page.
-- **Manual override editing** — long-press to pin/unpin any calculated
-  value. The data layer already supports overrides; the UI to set them
-  is queued.
-- **Combat / spells / inventory pages** — a single overview page is
-  enough to validate the architecture; the dedicated pages land later.
-- **Annotation layer** (commit 5) — freehand ink over the sheet.
-- **Export to PDF / image** — JSON export already exists via the
-  repository, but the UI button to trigger it isn't wired yet.
+- **Long-press to pin** — any calculated value (ability modifier, skill
+  bonus, save, passive score, initiative, spell DC/attack) can be
+  long-pressed in edit mode to open a number-entry dialog. The calculated
+  value is shown as the placeholder so the user can nudge rather than
+  retype. Confirming stores the value in `ManualOverrides`.
+- **Pin dot** — pinned values render the existing `PinnedIndicator` dot.
+  Long-pressing a pinned value re-opens the dialog pre-filled; clearing
+  the field and confirming removes the override and restores the engine's
+  calculation.
+- **No new storage** — `ManualOverrides` was already a first-class field
+  on `Character` since commit 1; the UI just needed to write to it.
+
+## What's in commit 7 (free-form layout)
+
+- **Draggable boxes** — boxes are positioned absolutely on a scrollable
+  `SheetCanvas`. Drag handle anywhere on the box surface while in edit
+  mode. 4 dp snap grid prevents sub-pixel drift. Position is clamped to
+  canvas bounds so boxes can't be dragged off-screen.
+- **Resizable boxes** — bottom-right corner handle. Width/height are each
+  independently resizable; a minimum size per box type is enforced.
+- **Z-ordering** — ▲/▼ buttons at `TopEnd` of each box increment/decrement
+  the z-index. Boxes are rendered in z-order; the focused box always
+  appears above neighbours.
+- **Persisted layout** — `SheetLayout` (a `Map<String, BoxPosition>`) is
+  stored in the character's JSON blob. `BoxPosition` holds x, y, width,
+  height, z-index, and font scale. Adding new fields to `BoxPosition`
+  with defaults requires no Room migration.
+- **`LocalBoxId`** — a `CompositionLocal` set per box so deep descendants
+  (e.g. `StatRow`) can query layout data without threading extra parameters.
+
+## What's in commit 8 (font scale + configurable passives)
+
+- **Per-box font scale** — +/− buttons at `TopStart` (secondaryContainer
+  color) adjust the box's typography from 0.5× to 2.0× in 0.1 steps.
+  The scale is applied via `MaterialTheme(typography = scaledTypography)`
+  wrapping the box content, using a `Typography.scaled(factor)` extension
+  that multiplies all 15 `TextUnit` sizes. Non-text elements (proficiency
+  dots, row padding, hit-dice controls) read `LocalBoxFontScale.current`
+  and scale their `Dp` values proportionally.
+- **Configurable passives** — `Character.passiveSkills` replaces the
+  hardcoded Perception / Investigation / Insight triple. In edit mode the
+  passives box shows all 18 skills as toggle rows; selected skills sort
+  to the top so the box gives a live layout preview. In view mode only
+  selected skills render, sorted alphabetically.
+  `PassiveCalculator.passive(character, skill)` handles any skill and
+  delegates the classic three to their named override-aware methods.
+
+## What's not yet built
+
+- **Weapon / spell / inventory editing** — data model and repository
+  support them; dedicated edit pages are queued.
+- **Combat / spells / inventory pages** — the overview is the only sheet
+  page so far.
+- **PDF background layer** — `Character.pdfPath` field exists; the CV
+  field-detection and alignment UI are future work.
+- **Export to PDF / image** — JSON export works via the repository;
+  the share/export UI button isn't wired yet.
+- **Feature-based initiative bonuses** — the Alert feat and similar layer
+  on top of the DEX modifier; the engine hooks are ready.
+- **Class/race/background catalogs** — content differs per edition and
+  will load from bundled data files in a future commit.
 
 See the project spec's priority order for what lands next.
 

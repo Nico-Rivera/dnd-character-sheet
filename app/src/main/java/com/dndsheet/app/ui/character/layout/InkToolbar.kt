@@ -83,14 +83,14 @@ fun InkToolbar(
                 icon     = Icons.Default.AutoFixOff,
                 label    = "Eraser",
                 selected = activeTool == InkTool.ERASER,
-                enabled  = false,   // wired in commit 11
+                enabled  = true,
                 onClick  = { onToolChange(InkTool.ERASER) }
             )
             InkToolButton(
                 icon     = Icons.Default.CropFree,
                 label    = "Select",
                 selected = activeTool == InkTool.SELECTION,
-                enabled  = false,   // wired in commit 12a
+                enabled  = true,
                 onClick  = { onToolChange(InkTool.SELECTION) }
             )
 

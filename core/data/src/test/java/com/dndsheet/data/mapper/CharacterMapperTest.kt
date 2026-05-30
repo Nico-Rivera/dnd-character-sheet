@@ -7,11 +7,13 @@ import com.dndsheet.domain.enums.ProficiencyLevel
 import com.dndsheet.domain.enums.Ruleset
 import com.dndsheet.domain.enums.Skill
 import com.dndsheet.domain.model.AbilityScores
+import com.dndsheet.domain.model.BoxPosition
 import com.dndsheet.domain.model.Character
 import com.dndsheet.domain.model.ClassLevel
 import com.dndsheet.domain.model.InventoryItem
 import com.dndsheet.domain.model.ManualOverrides
 import com.dndsheet.domain.model.Proficiencies
+import com.dndsheet.domain.model.SheetLayout
 import com.dndsheet.domain.model.Spell
 import com.dndsheet.domain.model.SpellcastingProgression
 import com.dndsheet.domain.model.Weapon
@@ -185,6 +187,13 @@ class CharacterMapperTest {
 
         overrides = ManualOverrides(
             spellSaveDc = mapOf("Wizard" to 14)
+        ),
+
+        layout = SheetLayout(
+            positions = mapOf(
+                "VITALS_HP" to BoxPosition(x = 12f, y = 40f, width = 120f, height = 140f, z = 2),
+                "ABILITY_STR" to BoxPosition(x = 0f, y = 200f)
+            )
         ),
 
         revision = 12,

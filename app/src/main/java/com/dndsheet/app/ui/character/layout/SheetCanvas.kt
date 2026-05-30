@@ -75,7 +75,16 @@ enum class BoxId {
     SKILLS_ALL,
     SKILLS_STR, SKILLS_DEX, SKILLS_INT, SKILLS_WIS, SKILLS_CHA,
     PASSIVES,
-    CONDITIONS
+    CONDITIONS,
+
+    // ── Spellcasting (5.5e / 2024) — one box per spellcasting class, up to 6 ──
+    // Slots are filled in order; unused slots produce no child, so the canvas
+    // row collapses automatically when fewer than N classes are spellcasters.
+    SPELLCAST_CLASS_1, SPELLCAST_CLASS_2, SPELLCAST_CLASS_3,
+    SPELLCAST_CLASS_4, SPELLCAST_CLASS_5, SPELLCAST_CLASS_6,
+
+    // ── Spellcasting (5e / 2014) — three fixed summary boxes ──────────────────
+    SPELLCAST_ABILITY, SPELLCAST_DC, SPELLCAST_ATTACK
 }
 
 /**
@@ -92,11 +101,17 @@ fun defaultRows(ruleset: Ruleset): List<List<BoxId>> = buildList {
     if (ruleset == Ruleset.DND_5E_2014) {
         add(listOf(BoxId.SAVES_ALL))
         add(listOf(BoxId.SKILLS_ALL))
+        // 5e spellcasting — three summary boxes side-by-side.
+        add(listOf(BoxId.SPELLCAST_ABILITY, BoxId.SPELLCAST_DC, BoxId.SPELLCAST_ATTACK))
     } else {
         add(listOf(BoxId.SAVE_STR, BoxId.SAVE_DEX, BoxId.SAVE_CON))
         add(listOf(BoxId.SAVE_INT, BoxId.SAVE_WIS, BoxId.SAVE_CHA))
         // In 2024 mode skills are rendered inside the SAVE_* boxes —
         // no separate SKILLS_* rows in the default flow.
+        // 5.5e spellcasting — one box per class, two per row (up to 6 classes).
+        add(listOf(BoxId.SPELLCAST_CLASS_1, BoxId.SPELLCAST_CLASS_2))
+        add(listOf(BoxId.SPELLCAST_CLASS_3, BoxId.SPELLCAST_CLASS_4))
+        add(listOf(BoxId.SPELLCAST_CLASS_5, BoxId.SPELLCAST_CLASS_6))
     }
     add(listOf(BoxId.PASSIVES))
     add(listOf(BoxId.CONDITIONS))

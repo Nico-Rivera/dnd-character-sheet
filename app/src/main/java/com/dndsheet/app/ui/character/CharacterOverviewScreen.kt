@@ -100,6 +100,8 @@ import com.dndsheet.rules.PassiveCalculator
 import com.dndsheet.rules.ProficiencyCalculator
 import com.dndsheet.rules.SavingThrowCalculator
 import com.dndsheet.rules.SkillCalculator
+import com.dndsheet.rules.SpellcastingCalculator
+import com.dndsheet.rules.SpellcastingRow
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.material.icons.filled.Draw
 import androidx.compose.runtime.mutableStateListOf
@@ -454,6 +456,15 @@ private fun SheetBody(
         workingStrokes = workingStrokes + stroke
         onSaveStrokes(workingStrokes)
     }
+    val onErase: (Set<String>) -> Unit = { erasedIds ->
+        if (erasedIds.isNotEmpty()) {
+            undoStack.add(workingStrokes)
+            if (undoStack.size > 50) undoStack.removeAt(0)
+            redoStack.clear()
+            workingStrokes = workingStrokes.filter { it.id !in erasedIds }
+            onSaveStrokes(workingStrokes)
+        }
+    }
     val onUndo: () -> Unit = {
         if (undoStack.isNotEmpty()) {
             redoStack.add(workingStrokes)
@@ -467,6 +478,40 @@ private fun SheetBody(
             workingStrokes = redoStack.removeLast()
             onSaveStrokes(workingStrokes)
         }
+    }
+
+    // ── Selection callbacks ───────────────────────────────────────────────────
+    var clipboardStrokes by remember { mutableStateOf(emptyList<Stroke>()) }
+
+    fun pushUndo() {
+        undoStack.add(workingStrokes)
+        if (undoStack.size > 50) undoStack.removeAt(0)
+        redoStack.clear()
+    }
+    val onSelectionMove: (List<Stroke>) -> Unit = { moved ->
+        pushUndo()
+        val ids = moved.map { it.id }.toSet()
+        workingStrokes = workingStrokes.map { s -> moved.find { it.id == s.id } ?: s }
+        onSaveStrokes(workingStrokes)
+    }
+    val onSelectionDelete: (Set<String>) -> Unit = { ids ->
+        pushUndo()
+        workingStrokes = workingStrokes.filter { it.id !in ids }
+        onSaveStrokes(workingStrokes)
+    }
+    val onCopy: (List<Stroke>) -> Unit = { selected ->
+        clipboardStrokes = selected
+    }
+    val onCut: (Set<String>) -> Unit = { ids ->
+        clipboardStrokes = workingStrokes.filter { it.id in ids }
+        pushUndo()
+        workingStrokes = workingStrokes.filter { it.id !in ids }
+        onSaveStrokes(workingStrokes)
+    }
+    val onPaste: (List<Stroke>) -> Unit = { toInsert ->
+        pushUndo()
+        workingStrokes = workingStrokes + toInsert
+        onSaveStrokes(workingStrokes)
     }
 
     Column(modifier = Modifier.fillMaxSize()) {
@@ -582,6 +627,8 @@ private fun SheetBody(
                 SkillsBoxes(character, editing, onCycleSkillProf, onMove, onResize, onZChange, onFontScale, fontScaleFor, onCommit)
             }
 
+            SpellcastingBoxes(character, editing, onMove, onResize, onZChange, onFontScale, fontScaleFor, onCommit)
+
             EditableSheetBox(BoxId.PASSIVES, editing, onMove, onResize, onZChange, onFontScale, fontScaleFor(BoxId.PASSIVES), onCommit) {
                 SheetBox(title = "Passives") {
                     PassivesSection(character, editing, onTogglePassive)
@@ -607,7 +654,14 @@ private fun SheetBody(
                 activeTool       = activeTool,
                 penColor         = penColor,
                 penWidthDp       = penWidth,
+                clipboardStrokes = clipboardStrokes,
                 onStrokeComplete = onStrokeComplete,
+                onErase          = onErase,
+                onSelectionMove  = onSelectionMove,
+                onDelete         = onSelectionDelete,
+                onCopy           = onCopy,
+                onCut            = onCut,
+                onPaste          = onPaste,
                 modifier         = Modifier.matchParentSize()
             )
         } // end PDF+canvas Box
@@ -1020,6 +1074,158 @@ private fun SkillsBoxes(
                         SkillRow(character, skill, editing, onCycleSkillProf, showAbility = false)
                     }
                 }
+            }
+        }
+    }
+}
+
+// ── Spellcasting box IDs for 5.5e (per-class) ─────────────────────────────────
+private val spellcastClassBoxIds = listOf(
+    BoxId.SPELLCAST_CLASS_1, BoxId.SPELLCAST_CLASS_2, BoxId.SPELLCAST_CLASS_3,
+    BoxId.SPELLCAST_CLASS_4, BoxId.SPELLCAST_CLASS_5, BoxId.SPELLCAST_CLASS_6
+)
+
+/**
+ * Emits spellcasting box children for the SheetCanvas — nothing is emitted
+ * when the character has no spellcasting classes, so the canvas rows collapse.
+ *
+ * **5.5e (2024)**: one box per spellcasting class showing ability, modifier,
+ * save DC, and attack bonus for that class specifically.
+ *
+ * **5e (2014)**: three boxes — Spellcasting Ability, Spell Save DC, and
+ * Spell Attack Bonus — each listing all caster classes.
+ */
+@Composable
+private fun SpellcastingBoxes(
+    character: Character,
+    editing: Boolean,
+    onMove: (BoxId, Float, Float) -> Unit,
+    onResize: (BoxId, Float?, Float?) -> Unit,
+    onZChange: (BoxId, Int) -> Unit,
+    onFontScale: (BoxId, Int) -> Unit,
+    fontScaleFor: (BoxId) -> Float,
+    onCommit: () -> Unit
+) {
+    val rows = SpellcastingCalculator.rows(character)
+    if (rows.isEmpty()) return
+
+    if (character.ruleset == Ruleset.DND_5E_2024) {
+        // One box per spellcasting class, up to 6.
+        rows.take(6).forEachIndexed { index, row ->
+            val boxId   = spellcastClassBoxIds[index]
+            val abilMod = AbilityCalculator.modifier(character, row.ability)
+            EditableSheetBox(boxId, editing, onMove, onResize, onZChange, onFontScale, fontScaleFor(boxId), onCommit) {
+                SpellcastClassBox(row = row, abilityMod = abilMod)
+            }
+        }
+    } else {
+        // Three summary boxes — Ability | DC | Attack.
+        val multiclass = rows.size > 1
+        EditableSheetBox(BoxId.SPELLCAST_ABILITY, editing, onMove, onResize, onZChange, onFontScale, fontScaleFor(BoxId.SPELLCAST_ABILITY), onCommit) {
+            SpellcastSummaryBox(
+                title = "Spellcasting\nAbility",
+                lines = rows.map { row ->
+                    val mod = AbilityCalculator.modifier(character, row.ability)
+                    if (multiclass) "${row.className}: ${row.ability.abbr} ${formatModifier(mod)}"
+                    else "${row.ability.abbr}  ${formatModifier(mod)}"
+                }
+            )
+        }
+        EditableSheetBox(BoxId.SPELLCAST_DC, editing, onMove, onResize, onZChange, onFontScale, fontScaleFor(BoxId.SPELLCAST_DC), onCommit) {
+            SpellcastSummaryBox(
+                title = "Spell\nSave DC",
+                lines = rows.map { row ->
+                    if (multiclass) "${row.className}: ${row.saveDc}" else "${row.saveDc}"
+                }
+            )
+        }
+        EditableSheetBox(BoxId.SPELLCAST_ATTACK, editing, onMove, onResize, onZChange, onFontScale, fontScaleFor(BoxId.SPELLCAST_ATTACK), onCommit) {
+            SpellcastSummaryBox(
+                title = "Spell Attack\nBonus",
+                lines = rows.map { row ->
+                    if (multiclass) "${row.className}: ${formatModifier(row.attackBonus)}"
+                    else formatModifier(row.attackBonus)
+                }
+            )
+        }
+    }
+}
+
+/**
+ * 5.5e per-class spellcasting box. Matches image 1 reference layout:
+ * title = class name + ability abbreviation; three labelled rows below for
+ * the ability modifier, save DC (no sign), and attack bonus (signed).
+ *
+ * The "spellcasting modifier" on official sheets is the raw ability modifier,
+ * not ability + PB. The attack bonus (ability + PB) is shown separately.
+ */
+@Composable
+private fun SpellcastClassBox(row: SpellcastingRow, abilityMod: Int) {
+    val scale = LocalBoxFontScale.current
+    SheetBox(title = "${row.className}  •  ${row.ability.abbr}") {
+        SpellStatLine(label = "Spellcasting Modifier", value = formatModifier(abilityMod),   scale = scale)
+        SpellStatLine(label = "Spell Save DC",         value = row.saveDc.toString(),        scale = scale)
+        SpellStatLine(label = "Spell Attack Bonus",    value = formatModifier(row.attackBonus), scale = scale)
+    }
+}
+
+/** Single labelled stat line used inside spellcasting boxes. */
+@Composable
+private fun SpellStatLine(label: String, value: String, scale: Float) {
+    val vertPad = (4.dp * scale).coerceAtLeast(2.dp)
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(vertical = vertPad, horizontal = 4.dp),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        Text(
+            text     = label,
+            style    = MaterialTheme.typography.bodySmall,
+            color    = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.75f),
+            modifier = Modifier.weight(1f)
+        )
+        Text(
+            text       = value,
+            style      = MaterialTheme.typography.bodyMedium,
+            fontWeight = FontWeight.SemiBold
+        )
+    }
+}
+
+/**
+ * 5e per-category box (Ability | DC | Attack). One text line per caster class;
+ * when only one class is present the class name prefix is omitted.
+ */
+@Composable
+private fun SpellcastSummaryBox(title: String, lines: List<String>) {
+    val scale = LocalBoxFontScale.current
+    Box(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clip(RoundedCornerShape(6.dp))
+            .background(MaterialTheme.colorScheme.surfaceVariant)
+            .border(1.dp, MaterialTheme.colorScheme.outline, RoundedCornerShape(6.dp))
+            .padding(horizontal = 10.dp, vertical = 8.dp)
+    ) {
+        Column(
+            horizontalAlignment = Alignment.CenterHorizontally,
+            modifier = Modifier.fillMaxWidth()
+        ) {
+            Text(
+                text      = title,
+                style     = MaterialTheme.typography.labelSmall,
+                color     = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.65f),
+                textAlign = androidx.compose.ui.text.style.TextAlign.Center
+            )
+            Spacer(Modifier.height((4.dp * scale).coerceAtLeast(2.dp)))
+            lines.forEach { line ->
+                Text(
+                    text       = line,
+                    style      = MaterialTheme.typography.bodyMedium,
+                    fontWeight = FontWeight.SemiBold,
+                    textAlign  = androidx.compose.ui.text.style.TextAlign.Center
+                )
             }
         }
     }
