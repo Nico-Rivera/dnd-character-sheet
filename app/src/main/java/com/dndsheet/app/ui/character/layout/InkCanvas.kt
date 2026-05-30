@@ -47,6 +47,7 @@ import androidx.compose.ui.unit.dp
 import com.dndsheet.domain.model.Stroke
 import com.dndsheet.domain.model.StrokePoint
 import java.util.UUID
+import kotlin.math.abs
 import kotlin.math.atan2
 import kotlin.math.cos
 import kotlin.math.sin
@@ -123,7 +124,22 @@ fun InkCanvas(
 
     // ── PEN ───────────────────────────────────────────────────────────────────
     val currentPoints = remember { mutableStateListOf<StrokePoint>() }
-    var isDrawing by remember { mutableStateOf(false) }
+    var isDrawing     by remember { mutableStateOf(false) }
+    // Position where the current stroke began (canvas px).
+    var strokeStartPos by remember { mutableStateOf(Offset.Zero) }
+    // When non-null, a straight-line preview is showing at this (already snapped) endpoint.
+    var straightLinePreviewEnd by remember { mutableStateOf<Offset?>(null) }
+    // Emitting a position starts the 500 ms hold-to-straighten countdown;
+    // emitting null cancels it. collectLatest auto-cancels on each new emission.
+    val straightLineSignal = remember { MutableStateFlow<Offset?>(null) }
+    LaunchedEffect(straightLineSignal) {
+        straightLineSignal.collectLatest { pos ->
+            if (pos != null) {
+                delay(500L)
+                straightLinePreviewEnd = snapToAxis(strokeStartPos, pos)
+            }
+        }
+    }
 
     // ── ERASER ────────────────────────────────────────────────────────────────
     var eraserPosition by remember { mutableStateOf<Offset?>(null) }
@@ -157,8 +173,12 @@ fun InkCanvas(
         }
     }
 
-    // Clear all selection state when switching away from SELECTION tool.
+    // Clear tool-specific state when the active tool changes.
     LaunchedEffect(activeTool) {
+        if (activeTool != InkTool.PEN) {
+            straightLinePreviewEnd = null
+            straightLineSignal.value = null
+        }
         if (activeTool != InkTool.SELECTION) {
             selectedIds = emptySet()
             rubberBandRect = null
@@ -201,6 +221,7 @@ fun InkCanvas(
 
                         // Reset all tool-specific state on every tool change.
                         isDrawing = false;   currentPoints.clear()
+                        straightLinePreviewEnd = null; straightLineSignal.value = null
                         eraserPosition = null; erasedThisGesture.clear()
                         isResizing = false;  resizeDelta = Offset.Zero
                         isRotating = false;  rotateAngleDelta = 0f
@@ -215,14 +236,28 @@ fun InkCanvas(
                                         val change = event.changes.firstOrNull() ?: continue
                                         when (event.type) {
                                             PointerEventType.Press -> {
+                                                val pos = change.position
                                                 currentPoints.clear()
-                                                currentPoints.add(StrokePoint(change.position.x, change.position.y))
+                                                currentPoints.add(StrokePoint(pos.x, pos.y))
+                                                strokeStartPos         = pos
+                                                straightLinePreviewEnd = null
+                                                // Start hold-to-straighten countdown immediately.
+                                                straightLineSignal.value = pos
                                                 isDrawing = true
                                                 change.consume()
                                             }
                                             PointerEventType.Move -> {
                                                 if (isDrawing) {
-                                                    val raw  = change.position
+                                                    val raw = change.position
+                                                    if (straightLinePreviewEnd != null) {
+                                                        // User moved while preview was showing →
+                                                        // cancel the preview and resume freehand.
+                                                        straightLinePreviewEnd = null
+                                                    }
+                                                    // Restart the hold countdown from the new position.
+                                                    // collectLatest cancels the previous delay automatically.
+                                                    straightLineSignal.value = raw
+                                                    // Accumulate smoothed freehand points.
                                                     val prev = currentPoints.last()
                                                     currentPoints.add(StrokePoint(
                                                         x = prev.x * 0.6f + raw.x * 0.4f,
@@ -232,15 +267,33 @@ fun InkCanvas(
                                                 }
                                             }
                                             PointerEventType.Release -> {
-                                                if (isDrawing && currentPoints.isNotEmpty()) {
-                                                    latestOnStrokeComplete(Stroke(
-                                                        id     = UUID.randomUUID().toString(),
-                                                        points = currentPoints.toList(),
-                                                        color  = latestPenColor,
-                                                        width  = latestPenWidthDp
-                                                    ))
+                                                straightLineSignal.value = null
+                                                if (isDrawing) {
+                                                    val preview = straightLinePreviewEnd
+                                                    if (preview != null) {
+                                                        // Commit a clean straight line instead of
+                                                        // the freehand path.
+                                                        val start = strokeStartPos
+                                                        latestOnStrokeComplete(Stroke(
+                                                            id     = UUID.randomUUID().toString(),
+                                                            points = listOf(
+                                                                StrokePoint(start.x, start.y),
+                                                                StrokePoint(preview.x, preview.y)
+                                                            ),
+                                                            color = latestPenColor,
+                                                            width = latestPenWidthDp
+                                                        ))
+                                                    } else if (currentPoints.isNotEmpty()) {
+                                                        latestOnStrokeComplete(Stroke(
+                                                            id     = UUID.randomUUID().toString(),
+                                                            points = currentPoints.toList(),
+                                                            color  = latestPenColor,
+                                                            width  = latestPenWidthDp
+                                                        ))
+                                                    }
                                                 }
                                                 currentPoints.clear()
+                                                straightLinePreviewEnd = null
                                                 isDrawing = false
                                                 change.consume()
                                             }
@@ -462,7 +515,22 @@ fun InkCanvas(
                 }
 
                 // ── In-progress PEN stroke ─────────────────────────────────────
-                if (isDrawing && currentPoints.size >= 2) {
+                val previewEnd = straightLinePreviewEnd
+                if (isDrawing && previewEnd != null) {
+                    // Straight-line preview: dashed line from stroke start to snapped end.
+                    val widthPx = with(density) { latestPenWidthDp.dp.toPx() }
+                    canvas.drawPath(Path().apply {
+                        moveTo(strokeStartPos.x, strokeStartPos.y)
+                        lineTo(previewEnd.x, previewEnd.y)
+                    }, Paint().apply {
+                        color       = Color(latestPenColor.toInt()).copy(alpha = 0.55f)
+                        style       = PaintingStyle.Stroke
+                        strokeWidth = widthPx
+                        strokeCap   = StrokeCap.Round
+                        pathEffect  = PathEffect.dashPathEffect(floatArrayOf(widthPx * 3f, widthPx * 1.5f))
+                        isAntiAlias = true
+                    })
+                } else if (isDrawing && currentPoints.size >= 2) {
                     canvas.drawPath(buildPath(currentPoints), Paint().apply {
                         color       = Color(latestPenColor.toInt())
                         style       = PaintingStyle.Stroke
@@ -855,25 +923,4 @@ private fun segmentsIntersect(a: Offset, b: Offset, c: Offset, d: Offset): Boole
     return ((d1>0&&d2<0)||(d1<0&&d2>0)) && ((d3>0&&d4<0)||(d3<0&&d4>0))
 }
 
-private fun eraseAt(strokes: List<Stroke>, erased: MutableList<String>, x: Float, y: Float, radiusPx: Float) {
-    for (stroke in strokes) {
-        if (stroke.id in erased) continue
-        if (hitsStroke(stroke, x, y, radiusPx)) erased.add(stroke.id)
-    }
-}
-
-private fun hitsStroke(stroke: Stroke, x: Float, y: Float, radiusPx: Float): Boolean {
-    val pts = stroke.points; if (pts.isEmpty()) return false
-    val r2 = radiusPx * radiusPx
-    if (pts.size == 1) { val dx = pts[0].x-x; val dy = pts[0].y-y; return dx*dx+dy*dy <= r2 }
-    for (i in 0 until pts.size-1) { if (segmentDistSq(pts[i], pts[i+1], x, y) <= r2) return true }
-    return false
-}
-
-private fun segmentDistSq(a: StrokePoint, b: StrokePoint, px: Float, py: Float): Float {
-    val dx = b.x-a.x; val dy = b.y-a.y; val lenSq = dx*dx+dy*dy
-    if (lenSq == 0f) { val ex = px-a.x; val ey = py-a.y; return ex*ex+ey*ey }
-    val t = (((px-a.x)*dx+(py-a.y)*dy)/lenSq).coerceIn(0f,1f)
-    val ex = px-(a.x+t*dx); val ey = py-(a.y+t*dy); return ex*ex+ey*ey
-}
-
+private fun eraseAt(strokes: List<Stroke>, erased: MutableList<String>, x: Float, y: Float, radiu
