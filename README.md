@@ -10,8 +10,6 @@ An offline Android app for creating and running **Dungeons & Dragons** character
 | :---: | :---: | :---: |
 | _add `docs/screenshots/list.png`_ | _add `docs/screenshots/sheet.png`_ | _add `docs/screenshots/ink.png`_ |
 
-> Screenshots are placeholders — drop images into `docs/screenshots/` and the table above will render them.
-
 ## Features
 
 - **Automatic modifier calculations** — ability modifiers use the standard `floor((score − 10) / 2)` formula, and proficiency bonus is derived from total character level across all classes.
