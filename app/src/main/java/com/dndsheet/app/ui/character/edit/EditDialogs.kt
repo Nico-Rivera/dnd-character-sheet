@@ -156,11 +156,63 @@ fun HpAdjustDialog(
 }
 
 /**
- * Two-int dialog for HP (current / max). Temp HP is intentionally absent —
- * the spec calls for handling it via freehand annotation over the sheet
- * rather than as a structured field. The [com.dndsheet.domain.model.Character]
- * still carries a `temporaryHp` field for forward compatibility, but no
- * surface in the UI touches it.
+ * Temporary HP dialog. Per both 5e and 5.5e rules, temp HP does not stack:
+ * "Add" keeps the greater of the current pool and the entered amount (the
+ * max rule itself lives in [com.dndsheet.rules.HpCalculator]). "Clear" removes
+ * it. The current pool is shown so the player can see what they'd be replacing.
+ */
+@Composable
+fun TempHpDialog(
+    current: Int,
+    onDismiss: () -> Unit,
+    onAdd: (amount: Int) -> Unit,
+    onClear: () -> Unit
+) {
+    var raw by remember { mutableStateOf("") }
+    val amount = raw.toIntOrNull()
+    val ok = amount != null && amount > 0
+
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("Temporary HP") },
+        text = {
+            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                Text(
+                    text = "Current: $current",
+                    style = MaterialTheme.typography.bodyMedium
+                )
+                OutlinedTextField(
+                    value = raw,
+                    onValueChange = { raw = it.filter(Char::isDigit).take(4) },
+                    label = { Text("Amount") },
+                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+                    singleLine = true,
+                    modifier = Modifier.fillMaxWidth()
+                )
+                Text(
+                    text = "Temp HP doesn't stack — the higher value is kept.",
+                    style = MaterialTheme.typography.labelSmall
+                )
+            }
+        },
+        confirmButton = {
+            TextButton(onClick = { onAdd(amount!!); onDismiss() }, enabled = ok) {
+                Text("Add")
+            }
+        },
+        dismissButton = {
+            Row {
+                TextButton(onClick = { onClear(); onDismiss() }) { Text("Clear") }
+                TextButton(onClick = onDismiss) { Text("Cancel") }
+            }
+        }
+    )
+}
+
+/**
+ * Two-int dialog for HP (current / max). Temporary HP has its own entry point
+ * ([TempHpDialog]) since it follows different rules (no stacking, depleted
+ * first by damage), so this dialog stays focused on current/max.
  */
 @Composable
 fun HpDialog(

@@ -22,6 +22,8 @@ sealed interface ActiveDialog {
     data object EditHp : ActiveDialog
     /** Quick HP adjustment outside edit mode. [isHeal] flips sign; the dialog itself is the same. */
     data class AdjustHp(val isHeal: Boolean) : ActiveDialog
+    /** Receive / clear temporary HP. Available outside edit mode like [AdjustHp]. */
+    data object AddTempHp : ActiveDialog
     data class EditAbility(val ability: Ability) : ActiveDialog
 
     data object AddClass : ActiveDialog

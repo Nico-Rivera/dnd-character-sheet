@@ -39,7 +39,6 @@ import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
-import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
 import androidx.compose.material3.TopAppBarDefaults
 import androidx.compose.runtime.Composable
@@ -52,11 +51,18 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.clipToBounds
+import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.TransformOrigin
 import androidx.compose.ui.graphics.asImageBitmap
+import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.unit.IntSize
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
@@ -70,6 +76,7 @@ import com.dndsheet.app.ui.character.layout.EditableSheetBox
 import com.dndsheet.app.ui.character.layout.LocalBoxFontScale
 import com.dndsheet.app.ui.character.layout.MIN_BOX_HEIGHT_DP
 import com.dndsheet.app.ui.character.layout.MIN_BOX_WIDTH_DP
+import com.dndsheet.app.ui.character.layout.pinchToZoom
 import com.dndsheet.app.ui.character.layout.SheetCanvas
 import com.dndsheet.app.ui.character.layout.defaultRows
 import com.dndsheet.app.ui.character.edit.ActiveDialog
@@ -77,6 +84,7 @@ import com.dndsheet.app.ui.character.edit.AddClassDialog
 import com.dndsheet.app.ui.character.edit.AlignmentDialog
 import com.dndsheet.app.ui.character.edit.HpAdjustDialog
 import com.dndsheet.app.ui.character.edit.HpDialog
+import com.dndsheet.app.ui.character.edit.TempHpDialog
 import com.dndsheet.app.ui.character.edit.NumberFieldDialog
 import com.dndsheet.app.ui.character.edit.SelectDialog
 import com.dndsheet.app.ui.character.edit.TextFieldDialog
@@ -96,6 +104,7 @@ import kotlinx.coroutines.withContext
 import com.dndsheet.domain.model.ClassLevel
 import com.dndsheet.domain.model.SheetLayout
 import com.dndsheet.rules.AbilityCalculator
+import com.dndsheet.rules.HpCalculator
 import com.dndsheet.rules.PassiveCalculator
 import com.dndsheet.rules.ProficiencyCalculator
 import com.dndsheet.rules.SavingThrowCalculator
@@ -104,6 +113,7 @@ import com.dndsheet.rules.SpellcastingCalculator
 import com.dndsheet.rules.SpellcastingRow
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.material.icons.filled.Draw
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.mutableStateListOf
 import com.dndsheet.app.ui.character.layout.DEFAULT_INK_COLOR
 import com.dndsheet.app.ui.character.layout.DEFAULT_INK_WIDTH
@@ -207,8 +217,8 @@ fun CharacterOverviewScreen(
                     onRestoreAllHitDice = {
                         viewModel.update { it.copy(hitDiceRemaining = emptyMap()) }
                     },
-                    onPersistLayout = { positions ->
-                        viewModel.update { it.copy(layout = SheetLayout(positions)) }
+                    onPersistLayout = { layout ->
+                        viewModel.update { it.copy(layout = layout) }
                     },
                     onImportPdf = { path ->
                         viewModel.update { it.copy(pdfPath = path) }
@@ -321,14 +331,27 @@ private fun EditDialogHost(
             onDismiss = onDismiss,
             onConfirm = { amount ->
                 onApply {
-                    val signed = if (active.isHeal) amount else -amount
-                    // Clamp on both ends so a big heal can't overshoot max
-                    // and a big hit can't go below 0.
-                    it.copy(
-                        currentHp = (it.currentHp + signed).coerceIn(0, it.maxHp.coerceAtLeast(0))
-                    )
+                    if (active.isHeal) {
+                        // Healing restores current HP only (never temp HP),
+                        // capped at max.
+                        it.copy(currentHp = HpCalculator.heal(it.currentHp, it.maxHp, amount))
+                    } else {
+                        // Damage depletes temporary HP first, then current HP.
+                        val result = HpCalculator.takeDamage(it.currentHp, it.temporaryHp, amount)
+                        it.copy(currentHp = result.currentHp, temporaryHp = result.temporaryHp)
+                    }
                 }
             }
+        )
+
+        ActiveDialog.AddTempHp -> TempHpDialog(
+            current = character.temporaryHp,
+            onDismiss = onDismiss,
+            onAdd = { amount ->
+                // Temp HP doesn't stack: keep the greater of the two pools.
+                onApply { it.copy(temporaryHp = HpCalculator.applyTemporaryHp(it.temporaryHp, amount)) }
+            },
+            onClear = { onApply { it.copy(temporaryHp = 0) } }
         )
     }
 }
@@ -353,7 +376,7 @@ private fun SheetBody(
     onSpendHitDie: (dieSize: Int) -> Unit,
     onRestoreHitDie: (dieSize: Int) -> Unit,
     onRestoreAllHitDice: () -> Unit,
-    onPersistLayout: (Map<String, BoxPosition>) -> Unit,
+    onPersistLayout: (SheetLayout) -> Unit,
     onImportPdf: (pdfPath: String) -> Unit,
     onClearPdf: () -> Unit,
     onTogglePassive: (Skill) -> Unit,
@@ -370,8 +393,17 @@ private fun SheetBody(
     ) { uri ->
         uri ?: return@rememberLauncherForActivityResult
         scope.launch(Dispatchers.IO) {
-            val dest = File(context.filesDir, "pdfs/${character.id}.pdf")
-            dest.parentFile?.mkdirs()
+            val dir = File(context.filesDir, "pdfs")
+            dir.mkdirs()
+            // Remove any previously imported PDF(s) for this character. Using a
+            // unique (timestamped) destination filename is what makes "Replace"
+            // work: the pdfPath string actually changes, so the character state
+            // updates and PdfBackground re-renders. Writing to a fixed path kept
+            // the same string and the old pages stayed cached.
+            dir.listFiles { f ->
+                f.name.startsWith(character.id) && f.name.endsWith(".pdf")
+            }?.forEach { it.delete() }
+            val dest = File(dir, "${character.id}-${System.currentTimeMillis()}.pdf")
             context.contentResolver.openInputStream(uri)?.use { input ->
                 dest.outputStream().use { output -> input.copyTo(output) }
             }
@@ -396,6 +428,47 @@ private fun SheetBody(
         workingPositions = character.layout.positions
     }
 
+    // Reference width (dp) the stored positions are expressed in. Captured the
+    // first time a box is moved/resized (= the canvas width at that moment) and
+    // persisted so positions can be scaled back to whatever width the device is
+    // at on a later open/rotation, keeping boxes aligned to the background.
+    var workingReferenceWidth by remember(character.id) {
+        mutableStateOf(character.layout.referenceWidthDp)
+    }
+    androidx.compose.runtime.LaunchedEffect(character.layout.referenceWidthDp) {
+        workingReferenceWidth = character.layout.referenceWidthDp
+    }
+
+    // Live canvas/background width in px (the zoom Box fills the canvas width).
+    // Declared here so the drag handlers below can convert on-screen drag
+    // coordinates into the stored reference frame.
+    val density = LocalDensity.current
+    var zoomBoxSize by remember { mutableStateOf(IntSize.Zero) }
+    // Current canvas width in dp, or 0 before the first layout pass.
+    fun canvasWidthDp(): Float =
+        if (zoomBoxSize.width > 0) with(density) { zoomBoxSize.width.toDp().value } else 0f
+    // Converts an on-screen dp value into the stored reference frame, lazily
+    // establishing the reference width on first use.
+    fun toReferenceDp(screenDp: Float): Float {
+        val cw = canvasWidthDp()
+        if (workingReferenceWidth <= 0f && cw > 0f) workingReferenceWidth = cw
+        val refW = if (workingReferenceWidth > 0f) workingReferenceWidth else cw
+        return if (cw > 0f) screenDp * (refW / cw) else screenDp
+    }
+    // Ink is persisted separately from the layout, so a character that's only
+    // ever drawn on (never has a box moved) would otherwise never capture a
+    // reference width. Establish it from the current canvas width on the first
+    // coordinate-bearing ink edit and persist the layout so the scale survives
+    // a reload/rotation. Strokes committed at this moment are already in the
+    // reference frame (reference width == the width they were drawn at).
+    fun ensureReferenceWidth() {
+        val cw = canvasWidthDp()
+        if (workingReferenceWidth <= 0f && cw > 0f) {
+            workingReferenceWidth = cw
+            onPersistLayout(SheetLayout(workingPositions, workingReferenceWidth))
+        }
+    }
+
     val onMove: (BoxId, Float, Float) -> Unit = { id, x, y ->
         val prev = workingPositions[id.name] ?: BoxPosition()
         // Clamp to canvas-coordinate floor so a box can't be dragged above the
@@ -404,19 +477,22 @@ private fun SheetBody(
         // that space; without clamping the stored y goes negative, which leaves
         // the box above the viewport once those sections collapse in read mode.
         workingPositions = workingPositions + (id.name to prev.copy(
-            x = x.coerceAtLeast(0f),
-            y = y.coerceAtLeast(0f)
+            x = toReferenceDp(x.coerceAtLeast(0f)),
+            y = toReferenceDp(y.coerceAtLeast(0f))
         ))
     }
-    val onCommit: () -> Unit = { onPersistLayout(workingPositions) }
+    val onCommit: () -> Unit = {
+        onPersistLayout(SheetLayout(workingPositions, workingReferenceWidth))
+    }
 
     // widthDp / heightDp are nullable: null means "leave the stored value unchanged"
     // so a right-edge drag doesn't freeze the auto height, and vice versa.
+    // Incoming values are on-screen dp; convert to the stored reference frame.
     val onResize: (BoxId, Float?, Float?) -> Unit = { id, w, h ->
         val prev = workingPositions[id.name] ?: BoxPosition()
         workingPositions = workingPositions + (id.name to prev.copy(
-            width  = w?.coerceAtLeast(MIN_BOX_WIDTH_DP)  ?: prev.width,
-            height = h?.coerceAtLeast(MIN_BOX_HEIGHT_DP) ?: prev.height
+            width  = w?.let { toReferenceDp(it.coerceAtLeast(MIN_BOX_WIDTH_DP)) }  ?: prev.width,
+            height = h?.let { toReferenceDp(it.coerceAtLeast(MIN_BOX_HEIGHT_DP)) } ?: prev.height
         ))
     }
 
@@ -445,11 +521,20 @@ private fun SheetBody(
     var penColor   by remember { mutableStateOf(DEFAULT_INK_COLOR) }
     var penWidth   by remember { mutableStateOf(DEFAULT_INK_WIDTH) }
 
+    // ── Zoom state ──────────────────────────────────────────────────────────────
+    // Pinch-to-zoom is applied as a single graphicsLayer transform wrapping every
+    // sheet layer (PDF, boxes, ink) so they scale and pan as one rigid piece.
+    // Transient view state — reset per character, not persisted.
+    var zoomScale  by remember(character.id) { mutableStateOf(1f) }
+    var zoomOffset by remember(character.id) { mutableStateOf(Offset.Zero) }
+    // zoomBoxSize is declared earlier (drag handlers read the canvas width).
+
     // SnapshotStateList so the toolbar can observe .size for undo/redo enabled state.
     val undoStack = remember { mutableStateListOf<List<Stroke>>() }
     val redoStack = remember { mutableStateListOf<List<Stroke>>() }
 
     val onStrokeComplete: (Stroke) -> Unit = { stroke ->
+        ensureReferenceWidth()
         undoStack.add(workingStrokes)
         if (undoStack.size > 50) undoStack.removeAt(0)
         redoStack.clear()
@@ -565,7 +650,33 @@ private fun SheetBody(
 
         // PDF background (if set) renders behind the boxes inside a shared
         // Box so both scroll together in the parent Column.
-        Box(modifier = Modifier.fillMaxWidth()) {
+        //
+        // The outer Box owns layout (its height tracks the unscaled content) and
+        // clips the zoomed view. The inner Box carries the pinch-to-zoom detector
+        // and the single graphicsLayer that scales/pans every layer together —
+        // PDF background, sheet boxes and ink all live inside it, so a pinch zooms
+        // them as one piece. pinchToZoom sits *outside* graphicsLayer so it reads
+        // gestures in untransformed space, while the layers below receive
+        // correctly transformed pointer coordinates (ink stays aligned at any zoom).
+        Box(modifier = Modifier.fillMaxWidth().clipToBounds()) {
+        Box(
+            modifier = Modifier
+                .fillMaxWidth()
+                .onSizeChanged { zoomBoxSize = it }
+                .pinchToZoom(
+                    scaleProvider  = { zoomScale },
+                    offsetProvider = { zoomOffset },
+                    sizeProvider   = { zoomBoxSize },
+                    onChange       = { s, o -> zoomScale = s; zoomOffset = o }
+                )
+                .graphicsLayer {
+                    scaleX = zoomScale
+                    scaleY = zoomScale
+                    translationX = zoomOffset.x
+                    translationY = zoomOffset.y
+                    transformOrigin = TransformOrigin(0f, 0f)
+                }
+        ) {
             character.pdfPath?.let { path ->
                 PdfBackground(pdfPath = path, modifier = Modifier.fillMaxWidth())
             }
@@ -573,7 +684,8 @@ private fun SheetBody(
         SheetCanvas(
             positions = workingPositions,
             rows = defaultRows(character.ruleset),
-            modifier = Modifier.fillMaxWidth()
+            modifier = Modifier.fillMaxWidth(),
+            referenceWidthDp = workingReferenceWidth
         ) {
             EditableSheetBox(BoxId.HEADER, editing, onMove, onResize, onZChange, onFontScale, fontScaleFor(BoxId.HEADER), onCommit) {
                 HeaderBlock(character = character)
@@ -592,9 +704,11 @@ private fun SheetBody(
                 HpBox(
                     current = character.currentHp,
                     max = character.maxHp,
+                    temp = character.temporaryHp,
                     onEdit = if (editing) ({ onOpenDialog(ActiveDialog.EditHp) }) else null,
                     onDamage = { onOpenDialog(ActiveDialog.AdjustHp(isHeal = false)) },
-                    onHeal = { onOpenDialog(ActiveDialog.AdjustHp(isHeal = true)) }
+                    onHeal = { onOpenDialog(ActiveDialog.AdjustHp(isHeal = true)) },
+                    onTempHp = { onOpenDialog(ActiveDialog.AddTempHp) }
                 )
             }
 
@@ -662,9 +776,12 @@ private fun SheetBody(
                 onCopy           = onCopy,
                 onCut            = onCut,
                 onPaste          = onPaste,
-                modifier         = Modifier.matchParentSize()
+                onToolChange     = { activeTool = it },
+                modifier         = Modifier.matchParentSize(),
+                referenceWidthDp = workingReferenceWidth
             )
-        } // end PDF+canvas Box
+        } // end inner zoom Box (graphicsLayer)
+        } // end PDF+canvas Box (clip + layout)
         } // end scrollable Column
     } // end outer Column
 }
@@ -885,10 +1002,12 @@ private fun ClassEditorRow(
 private fun HpBox(
     current: Int,
     max: Int,
+    temp: Int,
     modifier: Modifier = Modifier,
     onEdit: (() -> Unit)? = null,
     onDamage: () -> Unit,
-    onHeal: () -> Unit
+    onHeal: () -> Unit,
+    onTempHp: () -> Unit
 ) {
     val click = if (onEdit != null) Modifier.clickable(onClick = onEdit) else Modifier
     Box(
@@ -911,6 +1030,18 @@ private fun HpBox(
                 style = MaterialTheme.typography.titleLarge,
                 fontWeight = FontWeight.SemiBold
             )
+            // Temporary HP lives in the same box; shown only when present so
+            // the box stays compact when there's none.
+            if (temp > 0) {
+                Text(
+                    "+$temp temp",
+                    style = MaterialTheme.typography.labelMedium,
+                    fontWeight = FontWeight.SemiBold,
+                    color = MaterialTheme.colorScheme.primary
+                )
+            }
+            // Damage / Temp HP / Heal sit on one row so the box stays usable
+            // at small sizes — the temp-HP button shrinks to "T.Hp" to fit.
             Row(
                 modifier = Modifier.fillMaxWidth(),
                 horizontalArrangement = Arrangement.spacedBy(4.dp)
@@ -920,6 +1051,11 @@ private fun HpBox(
                     modifier = Modifier.weight(1f),
                     contentPadding = androidx.compose.foundation.layout.PaddingValues(horizontal = 0.dp)
                 ) { Text("−", style = MaterialTheme.typography.titleMedium) }
+                OutlinedButton(
+                    onClick = onTempHp,
+                    modifier = Modifier.weight(1f),
+                    contentPadding = androidx.compose.foundation.layout.PaddingValues(horizontal = 0.dp)
+                ) { Text("T.Hp", style = MaterialTheme.typography.labelMedium, maxLines = 1) }
                 OutlinedButton(
                     onClick = onHeal,
                     modifier = Modifier.weight(1f),
@@ -1268,6 +1404,12 @@ private fun PassivesSection(
     onToggle: (Skill) -> Unit
 ) {
     val selectedSet = character.passiveSkills.toSet()
+    val overrideFor: (Skill) -> Boolean = { skill -> when (skill) {
+        Skill.PERCEPTION    -> character.overrides.passivePerception    != null
+        Skill.INVESTIGATION -> character.overrides.passiveInvestigation != null
+        Skill.INSIGHT       -> character.overrides.passiveInsight       != null
+        else                -> false
+    }}
 
     if (editing) {
         val (sel, unsel) = Skill.entries.partition { it in selectedSet }
@@ -1275,20 +1417,15 @@ private fun PassivesSection(
         Column {
             sorted.forEach { skill ->
                 PassiveToggleRow(
-                    skill       = skill,
+                    skill        = skill,
                     passiveScore = PassiveCalculator.passive(character, skill),
-                    isSelected  = skill in selectedSet,
-                    onClick     = { onToggle(skill) }
+                    isSelected   = skill in selectedSet,
+                    isOverridden = overrideFor(skill),
+                    onClick      = { onToggle(skill) }
                 )
             }
         }
     } else {
-        val overrideFor: (Skill) -> Boolean = { skill -> when (skill) {
-            Skill.PERCEPTION    -> character.overrides.passivePerception    != null
-            Skill.INVESTIGATION -> character.overrides.passiveInvestigation != null
-            Skill.INSIGHT       -> character.overrides.passiveInsight       != null
-            else                -> false
-        }}
         Column {
             character.passiveSkills
                 .sortedBy { it.display }
@@ -1314,11 +1451,14 @@ private fun PassiveToggleRow(
     skill: Skill,
     passiveScore: Int,
     isSelected: Boolean,
+    isOverridden: Boolean,
     onClick: () -> Unit
 ) {
     val scale      = LocalBoxFontScale.current
-    val slotSize   = (16.dp * scale).coerceAtLeast(10.dp)
-    val dotSize    = (12.dp * scale).coerceAtLeast(8.dp)
+    // Match StatRow geometry exactly so the dot, label and number sit in the
+    // same place whether or not edit mode is active.
+    val slotSize   = 16.dp * scale
+    val dotSize    = 12.dp * scale
     val vertPad    = (3.dp  * scale).coerceAtLeast(1.dp)
     val contentAlpha = if (isSelected) 1f else 0.38f
 
@@ -1358,10 +1498,16 @@ private fun PassiveToggleRow(
                 .weight(1f)
         )
         Text(
-            text       = passiveScore.toString(),
+            text       = formatModifier(passiveScore),
             style      = MaterialTheme.typography.bodyMedium,
             fontWeight = FontWeight.SemiBold,
             color      = onSurface.copy(alpha = contentAlpha)
+        )
+        // Trailing spacer/indicator matching StatRow so the number column lines
+        // up between edit and view modes.
+        PinnedIndicator(
+            visible  = isOverridden && isSelected,
+            modifier = Modifier.padding(start = 8.dp)
         )
     }
 }
@@ -1423,8 +1569,22 @@ private fun HitDiceBox(
                 fontWeight = FontWeight.SemiBold,
                 modifier = Modifier.weight(1f)
             )
+            // Compact clickable label rather than a TextButton: a TextButton
+            // enforces a ~40dp minimum height that is taller than the title
+            // text, so showing/hiding it would grow the header row and shove
+            // the die rows down (very visible near the box's minimum size).
+            // A plain clickable Text is no taller than the title, so the
+            // header height — and everything below it — stays put.
             if (anySpent) {
-                TextButton(onClick = onRestoreAll) { Text("Reset") }
+                Text(
+                    text = "Reset",
+                    style = MaterialTheme.typography.labelLarge,
+                    color = MaterialTheme.colorScheme.primary,
+                    modifier = Modifier
+                        .clip(RoundedCornerShape(4.dp))
+                        .clickable(onClick = onRestoreAll)
+                        .padding(horizontal = 8.dp, vertical = 2.dp)
+                )
             }
         }
         maxByDie.entries.sortedBy { it.key }.forEach { (dieSize, max) ->
