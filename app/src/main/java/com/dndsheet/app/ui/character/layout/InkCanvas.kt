@@ -42,8 +42,14 @@ import androidx.compose.ui.graphics.drawscope.Stroke as DrawStroke
 import androidx.compose.ui.graphics.drawscope.drawIntoCanvas
 import androidx.compose.ui.input.pointer.PointerEventType
 import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.input.pointer.pointerInteropFilter
+import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.unit.IntSize
 import androidx.compose.ui.unit.dp
+import android.os.SystemClock
+import android.view.MotionEvent
+import androidx.compose.ui.ExperimentalComposeUiApi
 import com.dndsheet.domain.model.Stroke
 import com.dndsheet.domain.model.StrokePoint
 import java.util.UUID
@@ -60,6 +66,21 @@ import kotlinx.coroutines.flow.collectLatest
 private const val SEL_PAD    = 10f  // padding around the selection bounding box
 private const val HANDLE_VIS = 8f   // visual radius of corner/rotate handles
 private const val ROT_OFFSET = 48f  // rotation handle distance above padded top edge
+
+// ── Stylus side-button gesture timing ──────────────────────────────────────────
+// A button press held longer than this becomes a "hold" → temporary eraser.
+private const val BTN_HOLD_THRESHOLD_MS  = 200L
+// Two button taps within this window toggle PEN ↔ SELECTION.
+private const val BTN_DOUBLE_TAP_MS      = 300L
+
+// ── Straight-line "hold still" deadzone ─────────────────────────────────────────
+// Pointer movement up to this distance from the still-anchor is treated as sensor
+// noise (finger micro-movement, S Pen jitter, pressure-driven Move events) and is
+// NOT enough to cancel the straight-line preview or restart the hold countdown.
+// Without this, an S Pen never sits still enough to trigger the preview, and a
+// finger's tiny lift-off move wipes the preview right before release. Raise if the
+// preview is still hard to trigger on a noisy digitizer; lower if it feels sticky.
+private const val STRAIGHTEN_JITTER_DP   = 6f
 
 // Corner hits → proportional resize (opposite corner fixed).
 // Edge hits   → single-axis resize (opposite edge fixed).
@@ -89,7 +110,17 @@ const val DEFAULT_INK_WIDTH: Float = 4f
  * Tools: PEN, ERASER, SELECTION (rubber-band, move, resize, rotate, copy/cut/paste).
  * When [inkMode] is false no [pointerInput] modifier is added so touches fall
  * through to the sheet boxes for edit-mode drag/resize.
+ *
+ * **Tablet stylus support**: the overlay works with integrated pens through the
+ * normal pointer-event path (hovering never draws — only contact triggers a
+ * stroke). The stylus side button drives [onToolChange]:
+ *  - **Hold** the button → temporarily switch to [InkTool.ERASER]; the previous
+ *    tool is restored on release.
+ *  - **Two quick taps** of the button → toggle between [InkTool.PEN] and
+ *    [InkTool.SELECTION].
+ * No pressure or tilt data is read.
  */
+@OptIn(ExperimentalComposeUiApi::class)
 @Composable
 fun InkCanvas(
     strokes: List<Stroke>,
@@ -105,15 +136,54 @@ fun InkCanvas(
     onCopy: (strokes: List<Stroke>) -> Unit,
     onCut: (ids: Set<String>) -> Unit,
     onPaste: (toInsert: List<Stroke>) -> Unit,
-    modifier: Modifier = Modifier
+    onToolChange: (InkTool) -> Unit,
+    modifier: Modifier = Modifier,
+    referenceWidthDp: Float = 0f
 ) {
     val density = LocalDensity.current
 
+    // ── Background-relative coordinate scaling ──────────────────────────────────
+    // Strokes are persisted in the reference frame captured when they were drawn
+    // (the canvas/background width at that time). The canvas itself fills that
+    // width, so to keep drawings aligned to the background across rotations we
+    // scale stored strokes to the current canvas width for all rendering/gesture
+    // work, then convert new/edited strokes back to the reference frame on emit.
+    // A reference width of 0 (legacy ink) disables scaling — strokes are then
+    // treated as raw canvas px, exactly as before.
+    var canvasSizePx by remember { mutableStateOf(IntSize.Zero) }
+    // Measured size of the floating selection action bar, used to keep it fully
+    // on-screen when the selection sits near (or past) a canvas edge.
+    var actionBarSizePx by remember { mutableStateOf(IntSize.Zero) }
+    val inkScale: Float = run {
+        val refPx = with(density) { referenceWidthDp.dp.toPx() }
+        if (referenceWidthDp > 0f && canvasSizePx.width > 0 && refPx > 0f)
+            canvasSizePx.width / refPx
+        else 1f
+    }
+    // Reference-frame strokes → current screen space (used everywhere internally).
+    val screenStrokes: List<Stroke> = remember(strokes, inkScale) {
+        if (inkScale == 1f) strokes
+        else strokes.map { it.scalePoints(inkScale) }
+    }
+    val screenClipboard: List<Stroke> = remember(clipboardStrokes, inkScale) {
+        if (inkScale == 1f) clipboardStrokes
+        else clipboardStrokes.map { it.scalePoints(inkScale) }
+    }
+    // Read at emit time so conversions use the live scale even from coroutines.
+    val latestInkScale by rememberUpdatedState(inkScale)
+    // Screen-space stroke → reference frame for persistence.
+    fun toRef(s: Stroke): Stroke {
+        val sc = latestInkScale
+        return if (sc == 1f) s else s.scalePoints(1f / sc)
+    }
+
     // Always-current refs — safe to read from long-lived coroutines.
-    val latestStrokes           by rememberUpdatedState(strokes)
+    val latestStrokes           by rememberUpdatedState(screenStrokes)
+    val latestActiveTool        by rememberUpdatedState(activeTool)
+    val latestOnToolChange      by rememberUpdatedState(onToolChange)
     val latestPenColor          by rememberUpdatedState(penColor)
     val latestPenWidthDp        by rememberUpdatedState(penWidthDp)
-    val latestClipboard         by rememberUpdatedState(clipboardStrokes)
+    val latestClipboard         by rememberUpdatedState(screenClipboard)
     val latestOnStrokeComplete  by rememberUpdatedState(onStrokeComplete)
     val latestOnErase           by rememberUpdatedState(onErase)
     val latestOnSelectionMove   by rememberUpdatedState(onSelectionMove)
@@ -127,6 +197,10 @@ fun InkCanvas(
     var isDrawing     by remember { mutableStateOf(false) }
     // Position where the current stroke began (canvas px).
     var strokeStartPos by remember { mutableStateOf(Offset.Zero) }
+    // Anchor for the stillness deadzone: the position from which the current
+    // hold-to-straighten countdown is being measured. Movement within
+    // STRAIGHTEN_JITTER_DP of this point is ignored as sensor noise.
+    var straightenAnchor by remember { mutableStateOf(Offset.Zero) }
     // When non-null, a straight-line preview is showing at this (already snapped) endpoint.
     var straightLinePreviewEnd by remember { mutableStateOf<Offset?>(null) }
     // Emitting a position starts the 500 ms hold-to-straighten countdown;
@@ -173,6 +247,31 @@ fun InkCanvas(
         }
     }
 
+    // ── STYLUS SIDE BUTTON ─────────────────────────────────────────────────────
+    // When non-null, the button is being held as a temporary eraser and this is
+    // the tool to restore on release. Null means no hold override is active.
+    var toolBeforeHold    by remember { mutableStateOf<InkTool?>(null) }
+    // Uptime of the last completed button tap, for double-tap detection.
+    var lastButtonTapMs   by remember { mutableStateOf(0L) }
+    // Tracks the physical button state to detect press/release transitions.
+    var stylusButtonDown  by remember { mutableStateOf(false) }
+    // true while the button is physically down. Drives the hold countdown:
+    // emitting true starts a BTN_HOLD_THRESHOLD_MS delay before switching to the
+    // eraser; emitting false cancels it (collectLatest auto-cancels on re-emit).
+    val buttonDownSignal  = remember { MutableStateFlow(false) }
+    LaunchedEffect(buttonDownSignal) {
+        buttonDownSignal.collectLatest { down ->
+            if (down) {
+                delay(BTN_HOLD_THRESHOLD_MS)
+                // Still held after the threshold → treat as a hold-to-erase.
+                if (latestActiveTool != InkTool.ERASER) {
+                    toolBeforeHold = latestActiveTool
+                    latestOnToolChange(InkTool.ERASER)
+                }
+            }
+        }
+    }
+
     // Clear tool-specific state when the active tool changes.
     LaunchedEffect(activeTool) {
         if (activeTool != InkTool.PEN) {
@@ -198,7 +297,7 @@ fun InkCanvas(
         if (isResizing) {
             return@run resizedBounds(resizeInitialBounds, resizeHandle, resizeDelta)
         }
-        val pts = strokes.filter { it.id in selectedIds }.flatMap { s ->
+        val pts = screenStrokes.filter { it.id in selectedIds }.flatMap { s ->
             when {
                 isMoving   -> s.points.map { StrokePoint(it.x + moveDelta.x, it.y + moveDelta.y) }
                 isRotating -> applyRotateToPoints(s.points, rotateInitialBounds.center, rotateAngleDelta)
@@ -210,14 +309,60 @@ fun InkCanvas(
                   pts.maxOf { it.x }, pts.maxOf { it.y })
     }
 
-    Box(modifier = modifier) {
+    Box(modifier = modifier.onSizeChanged { canvasSizePx = it }) {
 
         Canvas(
             modifier = Modifier
                 .fillMaxSize()
+                // Stylus side-button watcher. Reads the raw MotionEvent button
+                // state so it catches the S Pen / stylus barrel button
+                // (BUTTON_STYLUS_PRIMARY), which some OEMs (notably Samsung) do
+                // NOT additionally report as BUTTON_SECONDARY. The filter never
+                // consumes (always returns false), so pen/eraser/selection input
+                // is completely unaffected.
+                .then(
+                    if (inkMode) Modifier.pointerInteropFilter { me ->
+                        val pressed = me.buttonState and
+                            (MotionEvent.BUTTON_STYLUS_PRIMARY or MotionEvent.BUTTON_SECONDARY) != 0
+                        if (pressed && !stylusButtonDown) {
+                            // Button pressed — start the hold countdown.
+                            stylusButtonDown = true
+                            buttonDownSignal.value = true
+                        } else if (!pressed && stylusButtonDown) {
+                            // Button released — stop the hold countdown.
+                            stylusButtonDown = false
+                            buttonDownSignal.value = false
+                            val held = toolBeforeHold
+                            if (held != null) {
+                                // Was a hold-to-erase → restore previous tool.
+                                latestOnToolChange(held)
+                                toolBeforeHold = null
+                                lastButtonTapMs = 0L
+                            } else {
+                                // Released before the hold threshold → a tap.
+                                val now = SystemClock.uptimeMillis()
+                                if (now - lastButtonTapMs <= BTN_DOUBLE_TAP_MS) {
+                                    // Second quick tap → toggle PEN ↔ SELECTION.
+                                    val cur = latestActiveTool
+                                    latestOnToolChange(
+                                        if (cur == InkTool.PEN) InkTool.SELECTION
+                                        else InkTool.PEN
+                                    )
+                                    lastButtonTapMs = 0L
+                                } else {
+                                    lastButtonTapMs = now
+                                }
+                            }
+                        }
+                        false // never consume — observation only
+                    } else Modifier
+                )
                 .then(
                     if (inkMode) Modifier.pointerInput(activeTool) {
                         val handleHitPx = with(density) { 24.dp.toPx() }
+                        // Squared deadzone radius for the straight-line stillness test.
+                        val straightenJitterPx = with(density) { STRAIGHTEN_JITTER_DP.dp.toPx() }
+                        val straightenJitterPx2 = straightenJitterPx * straightenJitterPx
 
                         // Reset all tool-specific state on every tool change.
                         isDrawing = false;   currentPoints.clear()
@@ -234,12 +379,22 @@ fun InkCanvas(
                                     while (true) {
                                         val event  = awaitPointerEvent()
                                         val change = event.changes.firstOrNull() ?: continue
+                                        // Two+ fingers down → user is pinch-zooming.
+                                        // Abandon any in-progress stroke and let the
+                                        // zoom layer handle it.
+                                        if (event.changes.count { it.pressed } > 1) {
+                                            if (isDrawing) { isDrawing = false; currentPoints.clear() }
+                                            straightLinePreviewEnd   = null
+                                            straightLineSignal.value = null
+                                            continue
+                                        }
                                         when (event.type) {
                                             PointerEventType.Press -> {
                                                 val pos = change.position
                                                 currentPoints.clear()
                                                 currentPoints.add(StrokePoint(pos.x, pos.y))
                                                 strokeStartPos         = pos
+                                                straightenAnchor       = pos
                                                 straightLinePreviewEnd = null
                                                 // Start hold-to-straighten countdown immediately.
                                                 straightLineSignal.value = pos
@@ -249,15 +404,28 @@ fun InkCanvas(
                                             PointerEventType.Move -> {
                                                 if (isDrawing) {
                                                     val raw = change.position
-                                                    if (straightLinePreviewEnd != null) {
-                                                        // User moved while preview was showing →
-                                                        // cancel the preview and resume freehand.
-                                                        straightLinePreviewEnd = null
+                                                    // Stillness deadzone: only treat motion beyond
+                                                    // STRAIGHTEN_JITTER_DP from the current anchor as a
+                                                    // real move. Sub-threshold jitter (resting finger,
+                                                    // S Pen noise / pressure-change events) is ignored so
+                                                    // it neither cancels an in-flight preview nor keeps
+                                                    // restarting the hold countdown — which is what kept
+                                                    // the pen from ever previewing and made the finger
+                                                    // commit freehand on lift-off.
+                                                    val adx = raw.x - straightenAnchor.x
+                                                    val ady = raw.y - straightenAnchor.y
+                                                    if (adx * adx + ady * ady > straightenJitterPx2) {
+                                                        // Real movement → cancel any preview and restart
+                                                        // the countdown from the new anchor. collectLatest
+                                                        // cancels the previous delay automatically.
+                                                        if (straightLinePreviewEnd != null) {
+                                                            straightLinePreviewEnd = null
+                                                        }
+                                                        straightenAnchor         = raw
+                                                        straightLineSignal.value = raw
                                                     }
-                                                    // Restart the hold countdown from the new position.
-                                                    // collectLatest cancels the previous delay automatically.
-                                                    straightLineSignal.value = raw
-                                                    // Accumulate smoothed freehand points.
+                                                    // Accumulate smoothed freehand points regardless, so a
+                                                    // stroke that ends up freehand still captures the path.
                                                     val prev = currentPoints.last()
                                                     currentPoints.add(StrokePoint(
                                                         x = prev.x * 0.6f + raw.x * 0.4f,
@@ -274,7 +442,7 @@ fun InkCanvas(
                                                         // Commit a clean straight line instead of
                                                         // the freehand path.
                                                         val start = strokeStartPos
-                                                        latestOnStrokeComplete(Stroke(
+                                                        latestOnStrokeComplete(toRef(Stroke(
                                                             id     = UUID.randomUUID().toString(),
                                                             points = listOf(
                                                                 StrokePoint(start.x, start.y),
@@ -282,14 +450,14 @@ fun InkCanvas(
                                                             ),
                                                             color = latestPenColor,
                                                             width = latestPenWidthDp
-                                                        ))
+                                                        )))
                                                     } else if (currentPoints.isNotEmpty()) {
-                                                        latestOnStrokeComplete(Stroke(
+                                                        latestOnStrokeComplete(toRef(Stroke(
                                                             id     = UUID.randomUUID().toString(),
                                                             points = currentPoints.toList(),
                                                             color  = latestPenColor,
                                                             width  = latestPenWidthDp
-                                                        ))
+                                                        )))
                                                     }
                                                 }
                                                 currentPoints.clear()
@@ -309,8 +477,18 @@ fun InkCanvas(
                                     while (true) {
                                         val event    = awaitPointerEvent()
                                         val change   = event.changes.firstOrNull() ?: continue
+                                        // Two+ fingers down → pinch-zoom; abandon erasing.
+                                        if (event.changes.count { it.pressed } > 1) {
+                                            eraserPosition = null
+                                            erasedThisGesture.clear()
+                                            continue
+                                        }
                                         val pos      = change.position
                                         val radiusPx = with(density) { (latestPenWidthDp * 2f).dp.toPx() }
+                                        // Only erase while the pointer is in actual
+                                        // contact. A hovering stylus reports Move events
+                                        // with change.pressed == false — those must never
+                                        // erase (not even visually) or move the cursor.
                                         when (event.type) {
                                             PointerEventType.Press -> {
                                                 erasedThisGesture.clear()
@@ -319,18 +497,20 @@ fun InkCanvas(
                                                 change.consume()
                                             }
                                             PointerEventType.Move -> {
-                                                val prevPos = eraserPosition ?: pos
-                                                val dx   = pos.x - prevPos.x
-                                                val dy   = pos.y - prevPos.y
-                                                val dist = sqrt(dx * dx + dy * dy)
-                                                val steps = maxOf(1, (dist / (radiusPx * 0.5f)).toInt())
-                                                for (step in 1..steps) {
-                                                    val t = step.toFloat() / steps
-                                                    eraseAt(latestStrokes, erasedThisGesture,
-                                                        prevPos.x + dx * t, prevPos.y + dy * t, radiusPx)
+                                                if (change.pressed) {
+                                                    val prevPos = eraserPosition ?: pos
+                                                    val dx   = pos.x - prevPos.x
+                                                    val dy   = pos.y - prevPos.y
+                                                    val dist = sqrt(dx * dx + dy * dy)
+                                                    val steps = maxOf(1, (dist / (radiusPx * 0.5f)).toInt())
+                                                    for (step in 1..steps) {
+                                                        val t = step.toFloat() / steps
+                                                        eraseAt(latestStrokes, erasedThisGesture,
+                                                            prevPos.x + dx * t, prevPos.y + dy * t, radiusPx)
+                                                    }
+                                                    eraserPosition = pos
+                                                    change.consume()
                                                 }
-                                                eraserPosition = pos
-                                                change.consume()
                                             }
                                             PointerEventType.Release -> {
                                                 eraserPosition = null
@@ -353,6 +533,14 @@ fun InkCanvas(
                                     while (true) {
                                         val event  = awaitPointerEvent()
                                         val change = event.changes.firstOrNull() ?: continue
+                                        // Two+ fingers down → pinch-zoom; abandon any
+                                        // in-progress selection transform/rubber-band.
+                                        if (event.changes.count { it.pressed } > 1) {
+                                            isMoving = false; isResizing = false; isRotating = false
+                                            rubberBandRect        = null
+                                            longPressSignal.value = null
+                                            continue
+                                        }
                                         val pos    = change.position
                                         when (event.type) {
 
@@ -406,31 +594,36 @@ fun InkCanvas(
                                             }
 
                                             PointerEventType.Move -> {
-                                                when {
-                                                    isMoving -> moveDelta = pos - dragStart
-                                                    isResizing -> resizeDelta = pos - dragStart
-                                                    isRotating -> {
-                                                        val c = rotateInitialBounds.center
-                                                        rotateAngleDelta = atan2(pos.y - c.y, pos.x - c.x) - rotateInitialAngle
-                                                    }
-                                                    else -> {
-                                                        if (!longPressLeftBuffer) {
-                                                            val dx = pos.x - dragStart.x
-                                                            val dy = pos.y - dragStart.y
-                                                            if (dx * dx + dy * dy > bufferPx * bufferPx) {
-                                                                longPressLeftBuffer   = true
-                                                                longPressSignal.value = null
-                                                            }
+                                                // Ignore hovering stylus moves (pressed == false):
+                                                // they must not move/resize/rotate a selection or
+                                                // grow the rubber-band rectangle.
+                                                if (change.pressed) {
+                                                    when {
+                                                        isMoving -> moveDelta = pos - dragStart
+                                                        isResizing -> resizeDelta = pos - dragStart
+                                                        isRotating -> {
+                                                            val c = rotateInitialBounds.center
+                                                            rotateAngleDelta = atan2(pos.y - c.y, pos.x - c.x) - rotateInitialAngle
                                                         }
-                                                        rubberBandRect = Rect(
-                                                            left   = minOf(dragStart.x, pos.x),
-                                                            top    = minOf(dragStart.y, pos.y),
-                                                            right  = maxOf(dragStart.x, pos.x),
-                                                            bottom = maxOf(dragStart.y, pos.y)
-                                                        )
+                                                        else -> {
+                                                            if (!longPressLeftBuffer) {
+                                                                val dx = pos.x - dragStart.x
+                                                                val dy = pos.y - dragStart.y
+                                                                if (dx * dx + dy * dy > bufferPx * bufferPx) {
+                                                                    longPressLeftBuffer   = true
+                                                                    longPressSignal.value = null
+                                                                }
+                                                            }
+                                                            rubberBandRect = Rect(
+                                                                left   = minOf(dragStart.x, pos.x),
+                                                                top    = minOf(dragStart.y, pos.y),
+                                                                right  = maxOf(dragStart.x, pos.x),
+                                                                bottom = maxOf(dragStart.y, pos.y)
+                                                            )
+                                                        }
                                                     }
+                                                    change.consume()
                                                 }
-                                                change.consume()
                                             }
 
                                             PointerEventType.Release -> {
@@ -443,6 +636,7 @@ fun InkCanvas(
                                                             .map { s -> s.copy(points = s.points.map { pt ->
                                                                 StrokePoint(pt.x + delta.x, pt.y + delta.y)
                                                             })}
+                                                            .map { toRef(it) }
                                                         if (moved.isNotEmpty()) latestOnSelectionMove(moved)
                                                         isMoving = false; moveDelta = Offset.Zero
                                                     }
@@ -451,6 +645,7 @@ fun InkCanvas(
                                                             .filter { it.id in selectedIds }
                                                             .map { s -> s.copy(points = applyResizeToPoints(
                                                                 s.points, resizeInitialBounds, resizeHandle, resizeDelta)) }
+                                                            .map { toRef(it) }
                                                         if (transformed.isNotEmpty()) latestOnSelectionMove(transformed)
                                                         isResizing = false; resizeHandle = HandleHit.NONE; resizeDelta = Offset.Zero
                                                     }
@@ -460,6 +655,7 @@ fun InkCanvas(
                                                         val transformed = latestStrokes
                                                             .filter { it.id in selectedIds }
                                                             .map { s -> s.copy(points = applyRotateToPoints(s.points, c, angle)) }
+                                                            .map { toRef(it) }
                                                         if (transformed.isNotEmpty()) latestOnSelectionMove(transformed)
                                                         isRotating = false; rotateAngleDelta = 0f
                                                     }
@@ -487,7 +683,7 @@ fun InkCanvas(
             drawIntoCanvas { canvas ->
 
                 // ── Committed strokes (with live transform preview) ────────────
-                for (stroke in strokes) {
+                for (stroke in screenStrokes) {
                     if (stroke.points.size < 2) continue
                     if (stroke.id in erasedThisGesture) continue
                     val isSelected = stroke.id in selectedIds
@@ -662,7 +858,7 @@ fun InkCanvas(
                 shadowElevation = 4.dp
             ) {
                 IconButton(
-                    onClick  = { latestOnPaste(pasteAt(latestClipboard, pressPos)); longPressPastePosition = null },
+                    onClick  = { latestOnPaste(pasteAt(latestClipboard, pressPos).map { toRef(it) }); longPressPastePosition = null },
                     modifier = Modifier.size(40.dp)
                 ) {
                     Icon(Icons.Default.ContentPaste, contentDescription = "Paste",
@@ -674,10 +870,22 @@ fun InkCanvas(
         // ── Selection action bar ───────────────────────────────────────────────
         if (activeTool == InkTool.SELECTION && selectedIds.isNotEmpty()) {
             selBounds?.let { bounds ->
-                val xDp = with(density) { bounds.left.toDp() }
-                val yDp = with(density) { (bounds.bottom + SEL_PAD + 6f).toDp() }
+                // Preferred anchor: just below the selection's bottom-left. Clamp
+                // into the canvas so the bar is always fully visible even when the
+                // selection is near or partly past an edge. The selection itself
+                // may live off-screen; only the action bar is constrained.
+                val rawX = bounds.left
+                val rawY = bounds.bottom + SEL_PAD + 6f
+                val maxX = (canvasSizePx.width  - actionBarSizePx.width ).coerceAtLeast(0)
+                val maxY = (canvasSizePx.height - actionBarSizePx.height).coerceAtLeast(0)
+                val clampedX = if (canvasSizePx.width  > 0) rawX.coerceIn(0f, maxX.toFloat()) else rawX.coerceAtLeast(0f)
+                val clampedY = if (canvasSizePx.height > 0) rawY.coerceIn(0f, maxY.toFloat()) else rawY.coerceAtLeast(0f)
+                val xDp = with(density) { clampedX.toDp() }
+                val yDp = with(density) { clampedY.toDp() }
                 SelectionActionBar(
-                    modifier  = Modifier.offset(x = xDp, y = yDp),
+                    modifier  = Modifier
+                        .offset(x = xDp, y = yDp)
+                        .onSizeChanged { actionBarSizePx = it },
                     showPaste = clipboardStrokes.isNotEmpty(),
                     onDelete  = { latestOnDelete(selectedIds); selectedIds = emptySet() },
                     onCopy    = { latestOnCopy(strokes.filter { it.id in selectedIds }) },
@@ -685,7 +893,7 @@ fun InkCanvas(
                     onPaste   = {
                         val center = Offset((bounds.left + bounds.right) / 2f,
                                             (bounds.top  + bounds.bottom) / 2f)
-                        latestOnPaste(pasteAt(latestClipboard, center))
+                        latestOnPaste(pasteAt(latestClipboard, center).map { toRef(it) })
                     }
                 )
             }
@@ -733,6 +941,17 @@ private fun SelectionActionBar(
         }
     }
 }
+
+/**
+ * Uniformly scales a stroke's point coordinates and width by [factor]. Used to
+ * convert between the persisted reference frame and the current canvas pixel
+ * space so drawings stay aligned to the background across device rotations.
+ */
+private fun Stroke.scalePoints(factor: Float): Stroke =
+    copy(
+        points = points.map { StrokePoint(it.x * factor, it.y * factor) },
+        width  = width * factor
+    )
 
 // ── Transform helpers ──────────────────────────────────────────────────────────
 
