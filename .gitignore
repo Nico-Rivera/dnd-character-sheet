@@ -21,3 +21,8 @@ Thumbs.db
 # Logs / temp
 *.log
 *.tmp
+
+# Signing
+*.keystore
+*.jks
+keystore.properties
