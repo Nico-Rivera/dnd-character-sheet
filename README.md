@@ -1,6 +1,6 @@
 # D&D Easy Sheet App
 
-An offline-first Android app for creating and running **Dungeons & Dragons** characters under both the **5e (2014)** and **2024 revised (5.5e)** rules. Stats are calculated automatically as you edit, the sheet layout is yours to rearrange, and a full ink layer lets you scribble on top of it like a paper sheet.
+An offline Android app for creating and running **Dungeons & Dragons** characters under both the **5e (2014)** and **2024 revised (5.5e)** rules. Stats are calculated automatically as you edit, the sheet layout is yours to rearrange, and a full ink layer lets you scribble on top of it like a paper sheet.
 
 > **Release:** `v0.1.0` · `minSdk 29` (Android 10+) · `targetSdk / compileSdk 34`
 
