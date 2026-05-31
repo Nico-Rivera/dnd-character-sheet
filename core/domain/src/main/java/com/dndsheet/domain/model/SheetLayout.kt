@@ -38,8 +38,19 @@ data class BoxPosition(
  * The map is intentionally keyed by String rather than an enum so the domain
  * module stays free of UI concerns; the :app module owns the BoxId enum and
  * is responsible for using consistent key names.
+ *
+ * @param referenceWidthDp the canvas/background width (dp) in effect when these
+ *        positions were authored. Every box coordinate in [positions] is stored
+ *        in this reference frame; at render time the canvas scales them by
+ *        currentWidth / referenceWidthDp so a moved/resized box keeps the same
+ *        position and size relative to the background when the device rotates
+ *        (the background fills the canvas width, so its frame is this width).
+ *        0 means "unset" — used by characters saved before this existed; those
+ *        layouts are rendered unscaled (positions interpreted as raw canvas dp),
+ *        preserving the previous canvas-relative behaviour until first re-edit.
  */
 @Serializable
 data class SheetLayout(
-    val positions: Map<String, BoxPosition> = emptyMap()
+    val positions: Map<String, BoxPosition> = emptyMap(),
+    val referenceWidthDp: Float = 0f
 )

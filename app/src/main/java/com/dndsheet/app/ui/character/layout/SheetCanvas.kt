@@ -44,6 +44,7 @@ import androidx.compose.ui.unit.IntSize
 import androidx.compose.ui.unit.dp
 import com.dndsheet.domain.enums.Ruleset
 import com.dndsheet.domain.model.BoxPosition
+import kotlin.math.roundToInt
 
 /** Global minimum box dimensions enforced during resize (dp values). */
 const val MIN_BOX_WIDTH_DP  = 80f
@@ -404,12 +405,24 @@ fun SheetCanvas(
     modifier: Modifier = Modifier,
     gap: Dp = 12.dp,
     bottomPadding: Dp = 24.dp,
+    referenceWidthDp: Float = 0f,
     content: @Composable () -> Unit
 ) {
     Layout(content = content, modifier = modifier) { measurables, constraints ->
         val gapPx    = gap.roundToPx()
         val bottomPx = bottomPadding.roundToPx()
         val maxW     = constraints.maxWidth
+
+        // Stored box coordinates live in the reference frame captured when the
+        // layout was authored (the canvas/background width at that time). Scale
+        // them to the current canvas width so a moved/resized box holds its
+        // position and size relative to the background across rotations. A
+        // reference width of 0 (legacy layouts) disables scaling — positions are
+        // then read as raw canvas dp, exactly as before.
+        val posScale: Float = if (referenceWidthDp > 0f) {
+            maxW.toFloat() / referenceWidthDp.dp.toPx()
+        } else 1f
+        fun scaledPx(valueDp: Float): Int = (valueDp.dp.toPx() * posScale).roundToInt()
 
         val byId: Map<String, androidx.compose.ui.layout.Measurable> =
             measurables.associateBy { (it.layoutId as? BoxId)?.name ?: (it.layoutId?.toString() ?: "") }
@@ -440,11 +453,11 @@ fun SheetCanvas(
         val measured = byId.entries.map { (id, measurable) ->
             val pos        = positions[id]
             val effWidthPx = when {
-                pos != null && pos.width > 0f -> pos.width.dp.roundToPx().coerceAtMost(maxW)
+                pos != null && pos.width > 0f -> scaledPx(pos.width).coerceAtMost(maxW)
                 else                          -> defaultWidth[id] ?: maxW
             }
             val childConstraints = if (pos != null && pos.height > 0f) {
-                Constraints.fixed(effWidthPx, pos.height.dp.roundToPx())
+                Constraints.fixed(effWidthPx, scaledPx(pos.height))
             } else {
                 Constraints(minWidth = effWidthPx, maxWidth = effWidthPx,
                             minHeight = 0, maxHeight = Constraints.Infinity)
@@ -466,9 +479,9 @@ fun SheetCanvas(
 
         // --- final placement ----------------------------------------------
         fun placeX(m: Measured): Int =
-            if (m.pos != null) m.pos.x.dp.roundToPx() else (defaultX[m.id] ?: 0)
+            if (m.pos != null) scaledPx(m.pos.x) else (defaultX[m.id] ?: 0)
         fun placeY(m: Measured): Int =
-            if (m.pos != null) m.pos.y.dp.roundToPx() else (defaultY[m.id] ?: 0)
+            if (m.pos != null) scaledPx(m.pos.y) else (defaultY[m.id] ?: 0)
 
         val maxBottom   = measured.maxOfOrNull { placeY(it) + it.placeable.height } ?: 0
         val totalHeight = (maxBottom + bottomPx).coerceAtLeast(constraints.minHeight)
