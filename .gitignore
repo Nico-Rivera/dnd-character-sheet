@@ -26,3 +26,6 @@ Thumbs.db
 *.keystore
 *.jks
 keystore.properties
+
+# Build outputs
+app/release/
