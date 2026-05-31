@@ -16,15 +16,14 @@ An offline Android app for creating and running **Dungeons & Dragons** character
 
 - **Automatic modifier calculations** — ability modifiers use the standard `floor((score − 10) / 2)` formula, and proficiency bonus is derived from total character level across all classes.
 - **Skills & saving throws** — bonuses recompute from the governing ability plus proficiency tier, with full support for proficient, half-proficient (Jack of All Trades / Remarkable Athlete), and expertise, all rounded per the rules.
-- **Weapons** — attack and damage bonuses pick the right ability automatically, handling finesse (best of STR/DEX), ranged, versatile damage, magic bonuses, proficiency inclusion, and per-weapon ability overrides (Pact of the Blade, Martial Arts).
-- **Spellcasting** — per-class spell save DC and spell attack modifier, plus multiclass spell-slot tables and Warlock pact magic. Half-caster slot rounding follows the edition (5e floors, 5.5e ceilings).
+- **Spellcasting** — per-class spell save DC and spell attack modifier.
 - **HP, hit dice & passives** — temporary-HP and damage rules, hit dice per class, and configurable passive Perception / Investigation / Insight (or any skill you pin).
 - **D&D 5e / 5.5e support** — choose the ruleset per character, so two characters in one campaign can run under different editions side by side. All 13 classes (Artificer through Wizard) ship as presets.
 - **Manual overrides** — any calculated value can be pinned to a manual number; overridden values are tracked separately so it's clear when a stat differs from the automatic result.
-- **Freehand annotations** — a Samsung Notes-style ink layer sits on top of the whole sheet: pen with adjustable color and width, whole-stroke eraser, selection, and 50-step undo/redo. Ink is saved with the character.
+- **Freehand annotations** — a Notes-style ink layer sits on top of the whole sheet: pen with adjustable color and width, whole-stroke eraser, selection, and undo/redo. Ink is saved with the character.
 - **Configurable layout** — rearrange the sheet's boxes per character and scale fonts per box; the arrangement persists.
 - **Character management** — create blank or example characters, duplicate, delete, and round-trip the full sheet to/from JSON for export/import.
-- **Offline-first & dark mode** — everything runs locally with no network dependency, with Material 3 theming and dynamic color on Android 12+.
+- **Offline & dark mode** — everything runs locally with no network dependency, with Material 3 theming and dynamic color on Android 12+.
 
 ## Tech Stack
 
@@ -59,14 +58,14 @@ Each save bumps a monotonic `revision`, and the UI observes character data via `
 4. **Run** the `:app` configuration on an emulator or device running Android 10 (API 29) or newer.
 
 ## Roadmap
-
-- Dice rolling and initiative tracking
-- 5.5e weapon mastery rules (stored on weapons today, not yet applied to math)
-- PDF sheet backgrounds with CV-detected field alignment (model field already present)
-- PDF and image export (JSON export ships today)
+- Dice Roll.
+- Species/Race database
+- Weapon boxes with automatic hit and damage display.
+- Features and spells boxes with automatic calculations.
+- Spell database
+- Automatic detection of PDF sheet backgrounds with Computer Vision detected field alignment
+- PDF and image export
 - Homebrew / custom classes and species
-- Spell database and monster stat-block integration
-- Campaign management, shared party sheets, and cloud sync
 
 ## Contributing
 
